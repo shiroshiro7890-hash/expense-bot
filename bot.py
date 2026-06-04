@@ -2,218 +2,274 @@ import os
 import json
 import base64
 import logging
+import re
+from datetime import datetime
+
 import anthropic
 import gspread
-from datetime import datetime
+from google.oauth2.service_account import Credentials
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from google.oauth2.service_account import Credentials
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+# ── Logging ──
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# ── Constants ──
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
-def get_credentials():
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    creds_dict = json.loads(creds_json)
-    return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+HEADER = ["No", "Tanggal", "Deskripsi", "Kategori", "Jumlah (Rp)", "Metode", "Keterangan", "Dicatat"]
 
-def detect_group(chat_title: str) -> str:
-    """Deteksi group berdasarkan nama: 'besar' atau 'petty/kecil'"""
-    title = (chat_title or "").lower()
-    if "besar" in title:
-        return "besar"
-    elif "petty" in title or "kecil" in title:
+# ── Helpers ──
+
+def get_group_type(chat_title: str) -> str:
+    t = (chat_title or "").lower()
+    if "kecil" in t or "petty" in t:
         return "kecil"
-    return "besar"  # default
+    return "besar"
 
-def get_sheet(group: str):
-    """Ambil worksheet berdasarkan group"""
-    creds = get_credentials()
-    gc = gspread.authorize(creds)
-
+def get_spreadsheet_id(group: str) -> str:
     if group == "kecil":
-        spreadsheet_id = os.environ["SPREADSHEET_ID_KAS_KECIL"]
-        sheet_title = "Expense Bot Kas Kecil"
-    else:
-        spreadsheet_id = os.environ["SPREADSHEET_ID_KAS_BESAR"]
-        sheet_title = "Expense Bot Kas Besar"
+        return os.environ["SPREADSHEET_ID_KAS_KECIL"]
+    return os.environ["SPREADSHEET_ID_KAS_BESAR"]
 
-    sh = gc.open_by_key(spreadsheet_id)
+def get_sheet_name(group: str) -> str:
+    if group == "kecil":
+        return "Expense Bot Kas Kecil"
+    return "Expense Bot Kas Besar"
 
+def get_gspread_client():
+    raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
+    info = json.loads(raw)
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+def get_or_create_sheet(group: str):
+    gc = get_gspread_client()
+    sid = get_spreadsheet_id(group)
+    sname = get_sheet_name(group)
+    sh = gc.open_by_key(sid)
     try:
-        ws = sh.worksheet(sheet_title)
+        ws = sh.worksheet(sname)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_title, rows=1000, cols=10)
-        ws.append_row(["No", "Tanggal", "Deskripsi", "Kategori", "Jumlah (Rp)", "Metode Pembayaran", "Keterangan", "Dicatat"])
+        ws = sh.add_worksheet(title=sname, rows=1000, cols=10)
+        ws.append_row(HEADER)
         ws.format("A1:H1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
         })
     return ws
 
-def extract_expense_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+def analyze_image(image_bytes: bytes) -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    prompt = """Kamu adalah asisten keuangan. Analisa struk/foto expense ini dan ekstrak informasi berikut dalam format JSON.
+    system = "Kamu adalah asisten keuangan yang mengekstrak data dari struk belanja. Selalu kembalikan HANYA JSON valid tanpa teks lain, tanpa markdown, tanpa penjelasan."
 
-Kategori yang tersedia:
-- Transportasi
-- Makan & Minum
-- Akomodasi
-- Operasional Kantor
-- Hiburan / Entertainment
-- Lainnya
+    prompt = """\
+Analisa struk/foto ini dan kembalikan JSON dengan format PERSIS seperti ini:
+{"tanggal":"YYYY-MM-DD","deskripsi":"deskripsi singkat","kategori":"Kategori","jumlah":0,"metode":"Metode","keterangan":"info tambahan"}
 
-Metode pembayaran yang tersedia:
-- Tunai
-- Transfer Bank
-- Kartu Kredit
-- Kartu Debit
-- E-Wallet
-- Lainnya
+Pilihan kategori: Transportasi, Makan & Minum, Belanja, Operasional Kantor, Hiburan, Lainnya
+Pilihan metode: Tunai, Transfer Bank, Kartu Kredit, Kartu Debit, QRIS, E-Wallet, Lainnya
 
-Kembalikan HANYA JSON ini (tanpa teks lain):
-{
-  "tanggal": "YYYY-MM-DD",
-  "deskripsi": "deskripsi singkat expense",
-  "kategori": "salah satu kategori di atas",
-  "jumlah": 0,
-  "metode_pembayaran": "salah satu metode di atas",
-  "keterangan": "info tambahan jika ada"
-}
+Aturan:
+- tanggal: format YYYY-MM-DD, jika tidak ada gunakan hari ini
+- jumlah: angka bulat tanpa titik/koma
+- Kembalikan HANYA JSON, tidak ada teks lain"""
 
-Jika tanggal tidak terlihat, gunakan tanggal hari ini.
-Jika jumlah tidak jelas, isi 0.
-Jumlah harus berupa angka tanpa titik/koma."""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=500,
+    resp = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=300,
+        system=system,
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": image_data}},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+                },
                 {"type": "text", "text": prompt}
             ]
         }]
     )
 
-    text = response.content[0].text.strip()
-text = text.replace("```json", "").replace("```", "").strip()
-# Cari JSON di dalam text
-import re
-match = re.search(r'\{.*\}', text, re.DOTALL)
-if match:
-    text = match.group()
-return json.loads(text)
+    raw = resp.content[0].text.strip()
+    logger.info(f"Claude raw response: {raw}")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Bersihkan response
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    # Cari JSON object
+    match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
+    if match:
+        raw = match.group()
+
+    data = json.loads(raw)
+
+    # Validasi field
+    return {
+        "tanggal": data.get("tanggal") or datetime.now().strftime("%Y-%m-%d"),
+        "deskripsi": str(data.get("deskripsi") or "-"),
+        "kategori": str(data.get("kategori") or "Lainnya"),
+        "jumlah": int(float(str(data.get("jumlah") or 0).replace(",", "").replace(".", ""))),
+        "metode": str(data.get("metode") or "Lainnya"),
+        "keterangan": str(data.get("keterangan") or ""),
+    }
+
+# ── Handlers ──
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    group = detect_group(chat.title or "")
+    group = get_group_type(chat.title or "")
     label = "Kas Besar" if group == "besar" else "Kas Kecil"
 
-    await update.message.reply_text(
-        f"👋 Halo! Gw bot pencatat expense untuk *{label}*.\n\n"
-        f"📸 Kirim foto struk/bon → gw otomatis catat ke Google Sheets!\n\n"
+    text = (
+        f"Halo! Saya bot pencatat expense untuk *{label}*\n\n"
+        f"Kirim foto struk -> otomatis tercatat ke Google Sheets\n\n"
         f"Perintah:\n"
-        f"/start - Mulai\n"
-        f"/cek - Lihat 5 expense terakhir",
-        parse_mode="Markdown"
+        f"/start - Info bot\n"
+        f"/cek - 5 transaksi terakhir\n"
+        f"/total - Total pengeluaran bulan ini"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-async def cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
+
     try:
-        chat = update.effective_chat
-        group = detect_group(chat.title or "")
-        ws = get_sheet(group)
-        data = ws.get_all_values()
+        ws = get_or_create_sheet(group)
+        rows = ws.get_all_values()
+        data_rows = [r for r in rows[1:] if r and r[0] and r[0] != "No"]
 
-        if len(data) <= 1:
-            await update.message.reply_text("📭 Belum ada data expense.")
+        if not data_rows:
+            await update.message.reply_text("Belum ada data transaksi.")
             return
 
-        rows = data[1:][-5:]  # 5 terakhir, skip header
-        label = "Kas Besar" if group == "besar" else "Kas Kecil"
-        text = f"📋 *5 Expense Terakhir ({label}):*\n\n"
+        last5 = data_rows[-5:]
+        text = f"*5 Transaksi Terakhir - {label}:*\n\n"
 
-        for row in rows:
-            if len(row) >= 5 and row[0] != "No":
-                try:
-                    jumlah = int(float(row[4]))
-                    text += f"• {row[1]} | {row[3]} | Rp {jumlah:,}\n  _{row[2]}_\n\n"
-                except:
-                    text += f"• {row[1]} | {row[3]} | {row[4]}\n  _{row[2]}_\n\n"
+        for row in reversed(last5):
+            try:
+                jumlah = int(float(str(row[4]).replace(",", "")))
+                text += f"- {row[1]} | {row[3]}\n  {row[2]}\n  Rp {jumlah:,} | {row[5]}\n\n"
+            except Exception:
+                text += f"- {row[1]} | {row[2]}\n\n"
 
         await update.message.reply_text(text, parse_mode="Markdown")
+
     except Exception as e:
-        logger.error(f"Cek error: {e}")
-        await update.message.reply_text("❌ Gagal mengambil data.")
+        logger.error(f"cmd_cek error: {e}")
+        await update.message.reply_text(f"Gagal mengambil data: {str(e)}")
+
+async def cmd_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
+    bulan_ini = datetime.now().strftime("%Y-%m")
+
+    try:
+        ws = get_or_create_sheet(group)
+        rows = ws.get_all_values()
+        data_rows = [r for r in rows[1:] if r and r[0] and r[0] != "No"]
+
+        total = 0
+        count = 0
+        for row in data_rows:
+            try:
+                if str(row[1]).startswith(bulan_ini):
+                    total += int(float(str(row[4]).replace(",", "")))
+                    count += 1
+            except Exception:
+                continue
+
+        bulan_label = datetime.now().strftime("%B %Y")
+        text = (
+            f"*Total {label} - {bulan_label}*\n\n"
+            f"Total: Rp {total:,}\n"
+            f"Transaksi: {count}"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"cmd_total error: {e}")
+        await update.message.reply_text(f"Gagal mengambil data: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Lagi analisa struk-nya, tunggu sebentar...")
-    try:
-        chat = update.effective_chat
-        group = detect_group(chat.title or "")
-        label = "Kas Besar" if group == "besar" else "Kas Kecil"
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
 
+    msg = await update.message.reply_text("Menganalisa struk, mohon tunggu...")
+
+    try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
+        image_bytes = bytes(await file.download_as_bytearray())
 
-        data = extract_expense_from_image(bytes(image_bytes))
+        data = analyze_image(image_bytes)
 
-        ws = get_sheet(group)
+        ws = get_or_create_sheet(group)
         all_rows = ws.get_all_values()
         no = len(all_rows)
 
-        jumlah = int(data.get("jumlah", 0))
         row = [
             no,
-            data.get("tanggal", datetime.now().strftime("%Y-%m-%d")),
-            data.get("deskripsi", "-"),
-            data.get("kategori", "Lainnya"),
-            jumlah,
-            data.get("metode_pembayaran", "Lainnya"),
-            data.get("keterangan", ""),
+            data["tanggal"],
+            data["deskripsi"],
+            data["kategori"],
+            data["jumlah"],
+            data["metode"],
+            data["keterangan"],
             datetime.now().strftime("%Y-%m-%d %H:%M")
         ]
         ws.append_row(row)
 
-        konfirmasi = (
-            f"✅ *Expense berhasil dicatat! ({label})*\n\n"
-            f"📅 Tanggal: {row[1]}\n"
-            f"📝 Deskripsi: {row[2]}\n"
-            f"🏷️ Kategori: {row[3]}\n"
-            f"💰 Jumlah: Rp {jumlah:,}\n"
-            f"💳 Metode: {row[5]}\n"
-            f"📌 Keterangan: {row[6] or '-'}"
+        await msg.edit_text(
+            f"Berhasil dicatat! ({label})\n\n"
+            f"Tanggal: {data['tanggal']}\n"
+            f"Deskripsi: {data['deskripsi']}\n"
+            f"Kategori: {data['kategori']}\n"
+            f"Jumlah: Rp {data['jumlah']:,}\n"
+            f"Metode: {data['metode']}\n"
+            f"Keterangan: {data['keterangan'] or '-'}"
         )
-        await update.message.reply_text(konfirmasi, parse_mode="Markdown")
 
-    except json.JSONDecodeError:
-        await update.message.reply_text("❌ Gagal membaca struk. Coba foto yang lebih jelas ya!")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error: {e}")
+        await msg.edit_text("Gagal membaca struk. Coba foto lebih jelas atau lebih dekat.")
     except Exception as e:
-        logger.error(f"Photo error: {e}")
-        await update.message.reply_text(f"❌ Terjadi error: {str(e)}")
+        logger.error(f"handle_photo error: {e}", exc_info=True)
+        await msg.edit_text(f"Terjadi error: {str(e)}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📸 Kirim foto struk/bon untuk mencatat expense.\n"
-        "Atau ketik /cek untuk melihat expense terakhir."
+        "Kirim foto struk untuk mencatat pengeluaran.\n\n"
+        "Perintah: /cek /total /start"
     )
+
+# ── Main ──
 
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cek", cek))
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("cek", cmd_cek))
+    app.add_handler(CommandHandler("total", cmd_total))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
     logger.info("Bot started!")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
