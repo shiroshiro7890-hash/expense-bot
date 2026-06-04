@@ -143,9 +143,9 @@ def get_sheet(group, dt=None):
             ])
         else:
             ws.append_row([
-                "Tanggal", "Admin", "Vendor", "Nominal", "Jenis",
-                "Kategori", "Deskripsi", "Tanggal Invoice",
-                "Rekening", "Penerima", "Status", "Link Foto"
+                "Tanggal", "Admin", "Deskripsi", "Kategori",
+                "Debet (Keluar)", "Kredit (Masuk)", "Saldo", "Keterangan",
+                "Tanggal Invoice", "Rekening Tujuan", "Nama Penerima", "Status", "Link Foto"
             ])
         ws.format("A1:M1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
@@ -158,24 +158,46 @@ def get_sheet(group, dt=None):
 # ─────────────────────────────────────────
 
 def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
+    saldo = get_saldo_besar(ws)
+    jenis_masuk = data["kategori"] in ["Pendapatan", "Modal Usaha"]
+    if jenis_masuk:
+        debet, kredit = 0, data["jumlah"]
+        saldo_baru = saldo + data["jumlah"]
+    else:
+        debet, kredit = data["jumlah"], 0
+        saldo_baru = saldo - data["jumlah"]
     tgl = datetime.now().strftime("%d/%m/%Y")
-    jenis = "Dana Masuk" if data["kategori"] in ["Pendapatan", "Modal Usaha"] else "Dana Keluar"
     row = [
         tgl,                    # A - Tanggal catat
         dicatat_oleh,           # B - Admin
-        data["vendor"],         # C - Vendor
-        fmt_rupiah(data["jumlah"]),  # D - Nominal
-        jenis,                  # E - Jenis
-        data["kategori"],       # F - Kategori
-        data["deskripsi"],      # G - Deskripsi
-        data["tanggal"],        # H - Tanggal Invoice
-        "",                     # I - Rekening
-        "",                     # J - Penerima
-        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # K - Status
-        foto_link               # L - Link Foto
+        data["deskripsi"],      # C - Deskripsi
+        data["kategori"],       # D - Kategori
+        fmt_rupiah(debet),      # E - Debet (Keluar)
+        fmt_rupiah(kredit),     # F - Kredit (Masuk)
+        fmt_rupiah(saldo_baru), # G - Saldo
+        data["vendor"],         # H - Keterangan/Vendor
+        data["tanggal"],        # I - Tanggal Invoice
+        "",                     # J - Rekening
+        "",                     # K - Penerima
+        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # L - Status
+        foto_link               # M - Link Foto
     ]
     logger.info(f"[SHEET] Append kas besar, foto_link: '{foto_link}'")
     ws.append_row(row)
+
+def get_saldo_besar(ws):
+    rows = ws.get_all_values()
+    saldo = 0
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        try:
+            debet  = float(re.sub(r'[^0-9.]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9.]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            saldo  = saldo + kredit - debet
+        except Exception:
+            continue
+    return saldo
 
 def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
     saldo = get_saldo_kecil(ws)
@@ -340,11 +362,11 @@ def get_all_transactions(ws, group):
             data_rows.append({
                 "row_idx": i,
                 "tanggal": row[0] if len(row) > 0 else "",
-                "vendor": row[2] if len(row) > 2 else "",
-                "nominal": row[3] if len(row) > 3 else "0",
-                "kategori": row[5] if len(row) > 5 else "",
-                "deskripsi": row[6] if len(row) > 6 else "",
-                "status": row[10] if len(row) > 10 else "",
+                "vendor": row[7] if len(row) > 7 else "",
+                "nominal": row[4] if len(row) > 4 else "0",
+                "kategori": row[3] if len(row) > 3 else "",
+                "deskripsi": row[2] if len(row) > 2 else "",
+                "status": row[11] if len(row) > 11 else "",
             })
         else:
             data_rows.append({
@@ -881,8 +903,8 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
         edit_label = f"EDITED - {datetime.now().strftime('%d/%m/%Y, %H.%M.%S')} by {editor}"
 
         if group == "besar":
-            field_col_map = {"deskripsi": 7, "kategori": 6, "nominal": 4, "tanggal": 8}
-            status_col = 11
+            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9}
+            status_col = 12
         else:
             field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9}
             status_col = 12
