@@ -31,6 +31,10 @@ BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
 
 KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI, INPUT_REKENING, INPUT_PENERIMA = range(8)
 EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
+DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
+
+# Admin yang boleh delete transaksi
+ADMIN_IDS = [5418153944]
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -422,6 +426,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/cek - Semua transaksi bulan ini\n"
         f"/total - Total bulan ini\n"
         f"/edit - Edit transaksi\n"
+        f"/delete - Hapus transaksi (admin)\n"
         f"/batal - Batalkan proses"
     )
 
@@ -987,8 +992,191 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 # ─────────────────────────────────────────
-# Fallback Handlers
+# Delete Handlers
 # ─────────────────────────────────────────
+
+def catat_log_delete(group, trx, deleted_by):
+    """Catat transaksi yang didelete ke sheet Log Delete"""
+    try:
+        gc = get_gspread_client()
+        if group == "kecil":
+            sid = os.environ["SPREADSHEET_ID_KAS_KECIL"]
+        else:
+            sid = os.environ["SPREADSHEET_ID_KAS_BESAR"]
+
+        sh = gc.open_by_key(sid)
+        try:
+            ws_log = sh.worksheet("Log Delete")
+        except gspread.WorksheetNotFound:
+            ws_log = sh.add_worksheet(title="Log Delete", rows=1000, cols=10)
+            ws_log.append_row([
+                "Waktu Delete", "Dihapus Oleh", "Group",
+                "Tanggal Transaksi", "Deskripsi", "Kategori",
+                "Nominal", "Vendor", "Status Lama"
+            ])
+            ws_log.format("A1:I1", {
+                "backgroundColor": {"red": 0.8, "green": 0.1, "blue": 0.1},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+            })
+
+        ws_log.append_row([
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            deleted_by,
+            "Kas Besar" if group == "besar" else "Kas Kecil",
+            trx.get("tanggal", ""),
+            trx.get("deskripsi", ""),
+            trx.get("kategori", ""),
+            trx.get("nominal", ""),
+            trx.get("vendor", ""),
+            trx.get("status", ""),
+        ])
+        logger.info(f"[DELETE] Log delete berhasil dicatat")
+    except Exception as e:
+        logger.error(f"[DELETE] Gagal catat log: {e}", exc_info=True)
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Cek apakah user adalah admin
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text(
+            "⛔ Kamu tidak punya akses untuk menghapus transaksi.\n"
+            "Fitur ini hanya untuk admin."
+        )
+        return ConversationHandler.END
+
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+
+    try:
+        ws = get_sheet(group)
+        transactions = get_all_transactions(ws, group)
+        if not transactions:
+            await update.message.reply_text("Belum ada transaksi yang bisa dihapus.")
+            return ConversationHandler.END
+
+        user_data_temp[user_id] = {
+            "group": group,
+            "delete_mode": True,
+            "transactions": transactions,
+            "delete_page": 0,
+        }
+        keyboard, total_pages = build_transaksi_keyboard(transactions, 0, group)
+        await update.message.reply_text(
+            f"🗑️ Pilih transaksi yang ingin dihapus:\n"
+            f"Halaman 1/{total_pages} ({len(transactions)} transaksi)\n\n"
+            f"⚠️ Transaksi yang dihapus akan dicatat di Log Delete.",
+            reply_markup=keyboard
+        )
+        return DELETE_PILIH_TRANSAKSI
+
+    except Exception as e:
+        logger.error(f"[DELETE] cmd_delete error: {e}")
+        await update.message.reply_text(f"❌ Gagal memuat transaksi: {e}")
+        return ConversationHandler.END
+
+async def handle_delete_pilih_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "edit_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Hapus dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    if query.data.startswith("edit_page_"):
+        page = int(query.data.replace("edit_page_", ""))
+        user_data_temp[user_id]["delete_page"] = page
+        transactions = user_data_temp[user_id]["transactions"]
+        group = user_data_temp[user_id]["group"]
+        keyboard, total_pages = build_transaksi_keyboard(transactions, page, group)
+        await query.edit_message_text(
+            f"🗑️ Pilih transaksi yang ingin dihapus:\n"
+            f"Halaman {page + 1}/{total_pages} ({len(transactions)} transaksi)",
+            reply_markup=keyboard
+        )
+        return DELETE_PILIH_TRANSAKSI
+
+    row_idx = int(query.data.replace("edit_trx_", ""))
+    transactions = user_data_temp[user_id]["transactions"]
+    trx = next((t for t in transactions if t["row_idx"] == row_idx), None)
+    if not trx:
+        await query.edit_message_text("❌ Transaksi tidak ditemukan.")
+        return ConversationHandler.END
+
+    user_data_temp[user_id]["delete_row_idx"] = row_idx
+    user_data_temp[user_id]["delete_trx"] = trx
+
+    try:
+        nominal = int(float(re.sub(r'[^0-9.]', '', str(trx["nominal"] or 0))))
+    except Exception:
+        nominal = 0
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Ya, Hapus Transaksi Ini", callback_data="delete_konfirmasi_ya")],
+        [InlineKeyboardButton("❌ Batal", callback_data="delete_konfirmasi_batal")],
+    ])
+
+    await query.edit_message_text(
+        f"⚠️ Konfirmasi Hapus Transaksi\n\n"
+        f"📅 Tanggal: {trx['tanggal']}\n"
+        f"📝 Deskripsi: {trx['deskripsi']}\n"
+        f"📂 Kategori: {trx['kategori']}\n"
+        f"💰 Nominal: {fmt_rupiah(nominal)}\n\n"
+        f"Transaksi ini akan dihapus dari sheet dan dicatat di Log Delete.\n"
+        f"Yakin ingin menghapus?",
+        reply_markup=keyboard
+    )
+    return DELETE_KONFIRMASI
+
+async def handle_delete_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "delete_konfirmasi_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Hapus dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    temp = user_data_temp[user_id]
+    row_idx = temp["delete_row_idx"]
+    trx = temp["delete_trx"]
+    group = temp["group"]
+    deleted_by = update.effective_user.first_name or "Admin"
+
+    try:
+        ws = get_sheet(group)
+
+        # Catat ke log delete dulu sebelum hapus
+        catat_log_delete(group, trx, deleted_by)
+
+        # Hapus baris dari sheet (ganti semua kolom jadi kosong)
+        ws.delete_rows(row_idx)
+
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text(
+            f"✅ Transaksi berhasil dihapus!\n\n"
+            f"📝 Deskripsi: {trx['deskripsi']}\n"
+            f"📂 Kategori: {trx['kategori']}\n"
+            f"🕐 Dihapus oleh: {deleted_by}\n"
+            f"📋 Log tersimpan di sheet 'Log Delete'"
+        )
+
+    except Exception as e:
+        logger.error(f"[DELETE] Gagal hapus: {e}", exc_info=True)
+        await query.edit_message_text(f"❌ Gagal menghapus transaksi: {e}")
+
+    return ConversationHandler.END
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -999,7 +1187,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Kirim foto struk untuk mencatat pengeluaran.\n"
-        "Perintah: /cek /total /edit /start /batal"
+        "Perintah: /cek /total /edit /delete /start /batal"
     )
 
 # ─────────────────────────────────────────
@@ -1042,8 +1230,20 @@ def main():
         per_user=True,
     )
 
+    delete_handler = ConversationHandler(
+        entry_points=[CommandHandler("delete", cmd_delete)],
+        states={
+            DELETE_PILIH_TRANSAKSI: [CallbackQueryHandler(handle_delete_pilih_transaksi, pattern="^edit_")],
+            DELETE_KONFIRMASI: [CallbackQueryHandler(handle_delete_konfirmasi, pattern="^delete_konfirmasi_")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False,
+        per_user=True,
+    )
+
     app.add_handler(input_handler)
     app.add_handler(edit_handler)
+    app.add_handler(delete_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cek", cmd_cek))
     app.add_handler(CommandHandler("total", cmd_total))
