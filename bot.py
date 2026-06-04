@@ -192,8 +192,8 @@ def get_saldo_besar(ws):
         if not row or not row[0]:
             continue
         try:
-            debet  = float(re.sub(r'[^0-9.]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
-            kredit = float(re.sub(r'[^0-9.]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            debet  = float(re.sub(r'[^0-9]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
             saldo  = saldo + kredit - debet
         except Exception:
             continue
@@ -234,9 +234,9 @@ def get_saldo_kecil(ws):
         if not row or not row[0]:
             continue
         try:
-            debet = float(re.sub(r'[^0-9.]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
-            kredit = float(re.sub(r'[^0-9.]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
-            saldo = saldo + kredit - debet
+            debet  = float(re.sub(r'[^0-9]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            saldo  = saldo + kredit - debet
         except Exception:
             continue
     return saldo
