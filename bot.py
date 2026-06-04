@@ -7,10 +7,11 @@ import hashlib
 import io
 from datetime import datetime
 
+import urllib.request
+import urllib.parse
+
 import anthropic
 import gspread
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,8 +23,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
 
 BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
@@ -55,58 +55,45 @@ def get_credentials():
 def get_gspread_client():
     return gspread.authorize(get_credentials())
 
-def get_drive_service():
-    return build("drive", "v3", credentials=get_credentials())
-
 # ─────────────────────────────────────────
-# Google Drive Upload
+# ImgBB Upload
 # ─────────────────────────────────────────
 
 def upload_foto_to_drive(image_bytes, filename):
-    """Upload foto ke Google Drive, return link. Return '' jika gagal."""
+    """Upload foto ke ImgBB, return link. Return '' jika gagal."""
     try:
-        folder_id = os.environ.get("DRIVE_FOLDER_ID", "").strip()
-        logger.info(f"[DRIVE] Mulai upload: {filename}, folder_id: '{folder_id}'")
-
-        if not folder_id:
-            logger.error("[DRIVE] DRIVE_FOLDER_ID kosong! Set di environment variable.")
+        api_key = os.environ.get("IMGBB_API_KEY", "").strip()
+        if not api_key:
+            logger.error("[IMGBB] IMGBB_API_KEY kosong!")
             return ""
 
-        drive = get_drive_service()
+        logger.info(f"[IMGBB] Mulai upload: {filename}")
 
-        file_metadata = {
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        data = urllib.parse.urlencode({
+            "key": api_key,
+            "image": b64,
             "name": filename,
-            "parents": [folder_id]
-        }
+        }).encode("utf-8")
 
-        media = MediaIoBaseUpload(
-            io.BytesIO(image_bytes),
-            mimetype="image/jpeg",
-            resumable=False
+        req = urllib.request.Request(
+            "https://api.imgbb.com/1/upload",
+            data=data,
+            method="POST"
         )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
 
-        uploaded = drive.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id,name,webViewLink"
-        ).execute()
-
-        file_id = uploaded.get("id")
-        logger.info(f"[DRIVE] File terupload, id: {file_id}")
-
-        # Set permission: siapa saja bisa lihat
-        drive.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"}
-        ).execute()
-        logger.info("[DRIVE] Permission public berhasil di-set")
-
-        link = f"https://drive.google.com/file/d/{file_id}/view"
-        logger.info(f"[DRIVE] Link: {link}")
-        return link
+        if result.get("success"):
+            link = result["data"]["url_viewer"]
+            logger.info(f"[IMGBB] Upload berhasil: {link}")
+            return link
+        else:
+            logger.error(f"[IMGBB] Upload gagal: {result}")
+            return ""
 
     except Exception as e:
-        logger.error(f"[DRIVE] Upload gagal - {type(e).__name__}: {e}", exc_info=True)
+        logger.error(f"[IMGBB] Upload error - {type(e).__name__}: {e}", exc_info=True)
         return ""
 
 # ─────────────────────────────────────────
