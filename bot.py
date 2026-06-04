@@ -26,25 +26,17 @@ SCOPES = [
 BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
          "Juli","Agustus","September","Oktober","November","Desember"]
 
-# State untuk ConversationHandler
-PILIH_KATEGORI, TULIS_DESKRIPSI = range(2)
+# States
+KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI = range(6)
 
-# Kategori yang tersedia
 KATEGORI = [
-    "Operational",
-    "Perlengkapan", 
-    "Pendapatan",
-    "Modal Usaha",
-    "Beban Bunga",
-    "Petty Cash",
-    "Marketing",
-    "Gaji"
+    "Operational", "Perlengkapan",
+    "Pendapatan", "Modal Usaha",
+    "Beban Bunga", "Petty Cash",
+    "Marketing", "Gaji"
 ]
 
-# Cache hash foto untuk cegah duplikat
 processed_hashes = set()
-
-# Simpan data sementara per user
 user_data_temp = {}
 
 def get_sheet_name_besar(dt=None):
@@ -123,6 +115,18 @@ def parse_json_safe(raw_text):
         result[key] = m.group(1).strip().strip('"').strip("'") if m else ""
     return result
 
+def parse_tanggal(tanggal):
+    tanggal = str(tanggal or "").strip()
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
+        tahun = int(tanggal[:4])
+        if 2020 <= tahun <= 2030:
+            return tanggal
+    elif re.match(r'^\d{2}[-/]\d{2}[-/]\d{4}$', tanggal):
+        sep = '-' if '-' in tanggal else '/'
+        parts = tanggal.split(sep)
+        return parts[2] + '-' + parts[1] + '-' + parts[0]
+    return datetime.now().strftime("%Y-%m-%d")
+
 def analyze_image(image_bytes):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -144,20 +148,7 @@ def analyze_image(image_bytes):
     logger.info("Claude response: " + raw)
     data = parse_json_safe(raw)
 
-    tanggal = str(data.get("tanggal") or "").strip()
-
-    # Validasi dan konversi format tanggal
-    if re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
-        tahun = int(tanggal[:4])
-        if tahun < 2020 or tahun > 2030:
-            tanggal = datetime.now().strftime("%Y-%m-%d")
-    elif re.match(r'^\d{2}[-/]\d{2}[-/]\d{4}$', tanggal):
-        sep = '-' if '-' in tanggal else '/'
-        parts = tanggal.split(sep)
-        tanggal = parts[2] + '-' + parts[1] + '-' + parts[0]
-    else:
-        tanggal = datetime.now().strftime("%Y-%m-%d")
-
+    tanggal = parse_tanggal(data.get("tanggal"))
     jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
     jumlah = int(jumlah_raw) if jumlah_raw else 0
 
@@ -167,6 +158,13 @@ def analyze_image(image_bytes):
         "jumlah": jumlah,
         "metode": str(data.get("metode") or "Lainnya").strip(),
     }
+
+def format_tanggal_display(tanggal_str):
+    try:
+        dt = datetime.strptime(tanggal_str, "%Y-%m-%d")
+        return dt.strftime("%d %B %Y")
+    except Exception:
+        return tanggal_str
 
 def get_saldo_kecil(ws):
     rows = ws.get_all_values()
@@ -197,12 +195,10 @@ def append_kas_kecil(ws, data, dicatat_oleh):
     saldo = get_saldo_kecil(ws)
     jenis_masuk = data["kategori"] in ["Pendapatan", "Modal Usaha"]
     if jenis_masuk:
-        debet = 0
-        kredit = data["jumlah"]
+        debet, kredit = 0, data["jumlah"]
         saldo_baru = saldo + data["jumlah"]
     else:
-        debet = data["jumlah"]
-        kredit = 0
+        debet, kredit = data["jumlah"], 0
         saldo_baru = saldo - data["jumlah"]
     tgl = datetime.now().strftime("%d/%m/%Y")
     row = [
@@ -212,6 +208,15 @@ def append_kas_kecil(ws, data, dicatat_oleh):
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
     ]
     ws.append_row(row)
+
+def build_konfirmasi_keyboard(tipe):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Benar", callback_data=tipe + "_benar"),
+            InlineKeyboardButton("Ubah", callback_data=tipe + "_ubah")
+        ],
+        [InlineKeyboardButton("Batalkan", callback_data=tipe + "_batal")]
+    ])
 
 def build_kategori_keyboard():
     keyboard = []
@@ -236,9 +241,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Halo! Saya bot pencatat untuk " + label + "\n"
         "Sheet aktif: " + sheet_name + "\n\n"
-        "Kirim foto struk -> pilih kategori -> tulis deskripsi -> tersimpan!\n\n"
+        "Alur: Foto -> Konfirmasi tanggal -> Konfirmasi nominal -> Pilih kategori -> Tulis deskripsi -> Simpan!\n\n"
         "/cek - 5 transaksi terakhir\n"
-        "/total - Total bulan ini"
+        "/total - Total bulan ini\n"
+        "/batal - Batalkan transaksi"
     )
 
 async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,7 +315,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await file.download_as_bytearray())
 
-        # Cek duplikat
         foto_hash = hashlib.md5(image_bytes).hexdigest()
         if foto_hash in processed_hashes:
             await msg.edit_text(
@@ -320,31 +325,155 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         data = analyze_image(image_bytes)
 
-        # Simpan data sementara
         user_data_temp[user_id] = {
             "data": data,
             "group": group,
             "foto_hash": foto_hash,
             "dicatat_oleh": update.effective_user.first_name or "Bot",
-            "msg_id": msg.message_id,
-            "chat_id": chat.id,
         }
 
+        tgl_display = format_tanggal_display(data["tanggal"])
         await msg.edit_text(
             "Struk terdeteksi!\n\n"
-            "Vendor: " + data["vendor"] + "\n"
-            "Jumlah: Rp " + "{:,}".format(data["jumlah"]) + "\n"
-            "Tanggal: " + data["tanggal"] + "\n"
-            "Metode: " + data["metode"] + "\n\n"
-            "Pilih kategori:",
-            reply_markup=build_kategori_keyboard()
+            "Vendor: " + data["vendor"] + "\n\n"
+            "Konfirmasi tanggal transaksi:\n"
+            "Tanggal: " + tgl_display + " (" + data["tanggal"] + ")\n\n"
+            "Apakah tanggal ini benar?",
+            reply_markup=build_konfirmasi_keyboard("tgl")
         )
-        return PILIH_KATEGORI
+        return KONFIRMASI_TANGGAL
 
     except Exception as e:
         logger.error("handle_photo error: " + str(e), exc_info=True)
         await msg.edit_text("Terjadi error: " + str(e))
         return ConversationHandler.END
+
+async def handle_konfirmasi_tanggal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "tgl_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("Transaksi dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
+    data = user_data_temp[user_id]["data"]
+
+    if query.data == "tgl_benar":
+        # Lanjut ke konfirmasi nominal
+        await query.edit_message_text(
+            "Tanggal: " + data["tanggal"] + " (dikonfirmasi)\n\n"
+            "Konfirmasi nominal transaksi:\n"
+            "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n\n"
+            "Apakah nominal ini benar?",
+            reply_markup=build_konfirmasi_keyboard("nom")
+        )
+        return KONFIRMASI_NOMINAL
+
+    elif query.data == "tgl_ubah":
+        await query.edit_message_text(
+            "Ketik tanggal yang benar dengan format:\n"
+            "DD/MM/YYYY\n\n"
+            "Contoh: 04/06/2026"
+        )
+        return INPUT_TANGGAL
+
+async def handle_input_tanggal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
+    tanggal = parse_tanggal(text)
+    if tanggal == datetime.now().strftime("%Y-%m-%d") and text != datetime.now().strftime("%d/%m/%Y"):
+        await update.message.reply_text(
+            "Format tanggal tidak valid.\n"
+            "Gunakan format DD/MM/YYYY\n"
+            "Contoh: 04/06/2026\n\n"
+            "Coba lagi:"
+        )
+        return INPUT_TANGGAL
+
+    user_data_temp[user_id]["data"]["tanggal"] = tanggal
+    data = user_data_temp[user_id]["data"]
+
+    await update.message.reply_text(
+        "Tanggal diperbarui: " + tanggal + "\n\n"
+        "Konfirmasi nominal transaksi:\n"
+        "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n\n"
+        "Apakah nominal ini benar?",
+        reply_markup=build_konfirmasi_keyboard("nom")
+    )
+    return KONFIRMASI_NOMINAL
+
+async def handle_konfirmasi_nominal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "nom_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("Transaksi dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
+    data = user_data_temp[user_id]["data"]
+
+    if query.data == "nom_benar":
+        await query.edit_message_text(
+            "Tanggal: " + data["tanggal"] + "\n"
+            "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n\n"
+            "Pilih kategori:",
+            reply_markup=build_kategori_keyboard()
+        )
+        return PILIH_KATEGORI
+
+    elif query.data == "nom_ubah":
+        await query.edit_message_text(
+            "Ketik nominal yang benar (angka saja):\n\n"
+            "Contoh: 62500"
+        )
+        return INPUT_NOMINAL
+
+async def handle_input_nominal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
+    jumlah_raw = re.sub(r'[^0-9]', '', text)
+    if not jumlah_raw:
+        await update.message.reply_text(
+            "Format tidak valid. Ketik angka saja.\n"
+            "Contoh: 62500\n\n"
+            "Coba lagi:"
+        )
+        return INPUT_NOMINAL
+
+    jumlah = int(jumlah_raw)
+    user_data_temp[user_id]["data"]["jumlah"] = jumlah
+    data = user_data_temp[user_id]["data"]
+
+    await update.message.reply_text(
+        "Nominal diperbarui: Rp " + "{:,}".format(jumlah) + "\n\n"
+        "Tanggal: " + data["tanggal"] + "\n"
+        "Nominal: Rp " + "{:,}".format(jumlah) + "\n\n"
+        "Pilih kategori:",
+        reply_markup=build_kategori_keyboard()
+    )
+    return PILIH_KATEGORI
 
 async def handle_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -356,18 +485,20 @@ async def handle_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Transaksi dibatalkan.")
         return ConversationHandler.END
 
-    kategori = query.data.replace("kat_", "")
-
     if user_id not in user_data_temp:
         await query.edit_message_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
 
+    kategori = query.data.replace("kat_", "")
     user_data_temp[user_id]["kategori"] = kategori
+    data = user_data_temp[user_id]["data"]
 
     await query.edit_message_text(
+        "Tanggal: " + data["tanggal"] + "\n"
+        "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n"
         "Kategori: " + kategori + "\n\n"
-        "Sekarang tulis deskripsi transaksi ini:\n"
-        "Contoh: bayar gaji, beli ATK, iuran RT, dll"
+        "Sekarang tulis deskripsi transaksi:\n"
+        "Contoh: bayar gaji, beli ATK, iuran RT"
     )
     return TULIS_DESKRIPSI
 
@@ -434,7 +565,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Kirim foto struk untuk mencatat pengeluaran.\n"
-        "Perintah: /cek /total /start"
+        "Perintah: /cek /total /start /batal"
     )
 
 def main():
@@ -444,6 +575,10 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, handle_photo)],
         states={
+            KONFIRMASI_TANGGAL: [CallbackQueryHandler(handle_konfirmasi_tanggal, pattern="^tgl_")],
+            INPUT_TANGGAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_tanggal)],
+            KONFIRMASI_NOMINAL: [CallbackQueryHandler(handle_konfirmasi_nominal, pattern="^nom_")],
+            INPUT_NOMINAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_nominal)],
             PILIH_KATEGORI: [CallbackQueryHandler(handle_kategori, pattern="^kat_")],
             TULIS_DESKRIPSI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_deskripsi)],
         },
