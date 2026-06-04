@@ -4,10 +4,13 @@ import base64
 import logging
 import re
 import hashlib
+import io
 from datetime import datetime
 
 import anthropic
 import gspread
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -26,8 +29,8 @@ SCOPES = [
 BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
          "Juli","Agustus","September","Oktober","November","Desember"]
 
-# States
 KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI = range(6)
+EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(6, 9)
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -36,8 +39,64 @@ KATEGORI = [
     "Marketing", "Gaji"
 ]
 
+PAGE_SIZE = 10
 processed_hashes = set()
 user_data_temp = {}
+
+# ── Google Auth ──
+
+def get_credentials():
+    raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
+    info = json.loads(raw)
+    return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+def get_gspread_client():
+    return gspread.authorize(get_credentials())
+
+def get_drive_service():
+    return build("drive", "v3", credentials=get_credentials())
+
+# ── Google Drive Upload ──
+
+def upload_foto_to_drive(image_bytes, filename):
+    """Upload foto ke Google Drive, return public link"""
+    try:
+        drive = get_drive_service()
+        folder_id = os.environ.get("DRIVE_FOLDER_ID", None)
+
+        file_metadata = {"name": filename}
+        if folder_id:
+            file_metadata["parents"] = [folder_id]
+
+        media = MediaIoBaseUpload(
+            io.BytesIO(image_bytes),
+            mimetype="image/jpeg",
+            resumable=False
+        )
+
+        file = drive.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
+
+        file_id = file.get("id")
+
+        # Set public permission
+        drive.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"}
+        ).execute()
+
+        link = "https://drive.google.com/file/d/" + file_id + "/view"
+        logger.info("Foto uploaded: " + link)
+        return link
+
+    except Exception as e:
+        logger.error("Upload foto error: " + str(e))
+        return ""
+
+# ── Sheet Helpers ──
 
 def get_sheet_name_besar(dt=None):
     d = dt or datetime.now()
@@ -52,12 +111,6 @@ def get_group_type(chat_title):
     if "kecil" in t or "petty" in t:
         return "kecil"
     return "besar"
-
-def get_gspread_client():
-    raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
-    info = json.loads(raw)
-    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    return gspread.authorize(creds)
 
 def get_sheet(group, dt=None):
     gc = get_gspread_client()
@@ -76,23 +129,22 @@ def get_sheet(group, dt=None):
             ws.append_row([
                 "Tanggal","Admin","Deskripsi","Kategori",
                 "Debet (Keluar)","Kredit (Masuk)","Saldo","Keterangan",
-                "Tanggal Invoice","Rekening Tujuan","Nama Penerima","Status"
+                "Tanggal Invoice","Rekening Tujuan","Nama Penerima","Status","Link Foto"
             ])
         else:
             ws.append_row([
                 "Tanggal","Admin","Vendor","Nominal","Jenis",
                 "Kategori","Deskripsi","Tanggal Invoice",
-                "Rekening","Penerima","Status"
+                "Rekening","Penerima","Status","Link Foto"
             ])
-        ws.format("A1:L1", {
+        ws.format("A1:M1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
         })
     return ws
 
 def parse_json_safe(raw_text):
-    text = raw_text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
+    text = raw_text.strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(text)
     except Exception:
@@ -127,10 +179,16 @@ def parse_tanggal(tanggal):
         return parts[2] + '-' + parts[1] + '-' + parts[0]
     return datetime.now().strftime("%Y-%m-%d")
 
+def format_tanggal_display(tanggal_str):
+    try:
+        dt = datetime.strptime(tanggal_str, "%Y-%m-%d")
+        return dt.strftime("%d %B %Y")
+    except Exception:
+        return tanggal_str
+
 def analyze_image(image_bytes):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-
     resp = client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=300,
@@ -139,32 +197,22 @@ def analyze_image(image_bytes):
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                {"type": "text", "text": 'Analisa struk ini. Kembalikan HANYA JSON:\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\nATURAN TANGGAL:\n- Format output WAJIB YYYY-MM-DD\n- Struk tulis 01-06-2026 atau 01/06/2026 = output 2026-06-01\n- Tahun HARUS 4 digit penuh (2026 bukan 26)\n\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat tanpa titik/koma\nHanya JSON, tidak ada teks lain'}
+                {"type": "text", "text": 'Analisa struk ini. Kembalikan HANYA JSON:\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\nATURAN TANGGAL:\n- Format output WAJIB YYYY-MM-DD\n- Struk tulis 01-06-2026 atau 01/06/2026 = output 2026-06-01\n- Tahun HARUS 4 digit penuh (2026 bukan 26)\n\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat\nHanya JSON, tidak ada teks lain'}
             ]
         }]
     )
-
     raw = resp.content[0].text
     logger.info("Claude response: " + raw)
     data = parse_json_safe(raw)
-
     tanggal = parse_tanggal(data.get("tanggal"))
     jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
     jumlah = int(jumlah_raw) if jumlah_raw else 0
-
     return {
         "tanggal": tanggal,
         "vendor": str(data.get("vendor") or "-").strip(),
         "jumlah": jumlah,
         "metode": str(data.get("metode") or "Lainnya").strip(),
     }
-
-def format_tanggal_display(tanggal_str):
-    try:
-        dt = datetime.strptime(tanggal_str, "%Y-%m-%d")
-        return dt.strftime("%d %B %Y")
-    except Exception:
-        return tanggal_str
 
 def get_saldo_kecil(ws):
     rows = ws.get_all_values()
@@ -180,18 +228,19 @@ def get_saldo_kecil(ws):
             continue
     return saldo
 
-def append_kas_besar(ws, data, dicatat_oleh):
+def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
     tgl = datetime.now().strftime("%d/%m/%Y")
     jenis = "Dana Masuk" if data["kategori"] in ["Pendapatan", "Modal Usaha"] else "Dana Keluar"
     row = [
         tgl, dicatat_oleh, data["vendor"], data["jumlah"],
         jenis, data["kategori"], data["deskripsi"],
         data["tanggal"], "", "",
-        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
+        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),
+        foto_link
     ]
     ws.append_row(row)
 
-def append_kas_kecil(ws, data, dicatat_oleh):
+def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
     saldo = get_saldo_kecil(ws)
     jenis_masuk = data["kategori"] in ["Pendapatan", "Modal Usaha"]
     if jenis_masuk:
@@ -205,7 +254,8 @@ def append_kas_kecil(ws, data, dicatat_oleh):
         tgl, dicatat_oleh, data["deskripsi"], data["kategori"],
         debet, kredit, saldo_baru,
         data["vendor"], data["tanggal"], "", "",
-        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
+        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),
+        foto_link
     ]
     ws.append_row(row)
 
@@ -231,7 +281,62 @@ def build_kategori_keyboard():
     keyboard.append([InlineKeyboardButton("Batalkan", callback_data="kat_BATAL")])
     return InlineKeyboardMarkup(keyboard)
 
-# ── Handlers ──
+def get_all_transactions(ws, group):
+    rows = ws.get_all_values()
+    data_rows = []
+    for i, row in enumerate(rows[1:], start=2):
+        if not row or not row[0]:
+            continue
+        if group == "besar":
+            data_rows.append({
+                "row_idx": i,
+                "tanggal": row[0] if len(row) > 0 else "",
+                "vendor": row[2] if len(row) > 2 else "",
+                "nominal": row[3] if len(row) > 3 else "0",
+                "kategori": row[5] if len(row) > 5 else "",
+                "deskripsi": row[6] if len(row) > 6 else "",
+                "status": row[10] if len(row) > 10 else "",
+            })
+        else:
+            data_rows.append({
+                "row_idx": i,
+                "tanggal": row[0] if len(row) > 0 else "",
+                "vendor": row[7] if len(row) > 7 else "",
+                "nominal": row[4] if len(row) > 4 else "0",
+                "kategori": row[3] if len(row) > 3 else "",
+                "deskripsi": row[2] if len(row) > 2 else "",
+                "status": row[11] if len(row) > 11 else "",
+            })
+    return list(reversed(data_rows))  # terbaru di atas
+
+def build_transaksi_keyboard(transactions, page, group):
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_data = transactions[start:end]
+    total_pages = (len(transactions) + PAGE_SIZE - 1) // PAGE_SIZE
+
+    keyboard = []
+    for trx in page_data:
+        try:
+            nominal = int(float(re.sub(r'[^0-9.]', '', str(trx["nominal"] or 0))))
+            label_btn = trx["tanggal"] + " | " + (trx["deskripsi"] or trx["vendor"])[:18] + " | Rp " + "{:,}".format(nominal)
+        except Exception:
+            label_btn = trx["tanggal"] + " | " + (trx["deskripsi"] or "")[:25]
+        keyboard.append([InlineKeyboardButton(label_btn, callback_data="edit_trx_" + str(trx["row_idx"]))])
+
+    # Tombol navigasi
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Prev", callback_data="edit_page_" + str(page - 1)))
+    if end < len(transactions):
+        nav.append(InlineKeyboardButton("Next ▶", callback_data="edit_page_" + str(page + 1)))
+    if nav:
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton("Batalkan", callback_data="edit_batal")])
+    return InlineKeyboardMarkup(keyboard), total_pages
+
+# ── Handlers Input Baru ──
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -241,10 +346,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Halo! Saya bot pencatat untuk " + label + "\n"
         "Sheet aktif: " + sheet_name + "\n\n"
-        "Alur: Foto -> Konfirmasi tanggal -> Konfirmasi nominal -> Pilih kategori -> Tulis deskripsi -> Simpan!\n\n"
+        "Perintah:\n"
         "/cek - 5 transaksi terakhir\n"
         "/total - Total bulan ini\n"
-        "/batal - Batalkan transaksi"
+        "/edit - Edit transaksi\n"
+        "/batal - Batalkan proses"
     )
 
 async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,9 +413,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     group = get_group_type(chat.title or "")
     user_id = update.effective_user.id
-
     msg = await update.message.reply_text("Menganalisa struk, mohon tunggu...")
-
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -317,18 +421,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         foto_hash = hashlib.md5(image_bytes).hexdigest()
         if foto_hash in processed_hashes:
-            await msg.edit_text(
-                "Foto ini sudah pernah dicatat!\n"
-                "Kirim foto berbeda untuk transaksi baru."
-            )
+            await msg.edit_text("Foto ini sudah pernah dicatat!\nKirim foto berbeda untuk transaksi baru.")
             return ConversationHandler.END
 
         data = analyze_image(image_bytes)
+
+        # Upload foto ke Drive di background
+        filename = "struk_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + foto_hash[:8] + ".jpg"
+        foto_link = upload_foto_to_drive(image_bytes, filename)
 
         user_data_temp[user_id] = {
             "data": data,
             "group": group,
             "foto_hash": foto_hash,
+            "foto_link": foto_link,
             "dicatat_oleh": update.effective_user.first_name or "Bot",
         }
 
@@ -342,7 +448,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_konfirmasi_keyboard("tgl")
         )
         return KONFIRMASI_TANGGAL
-
     except Exception as e:
         logger.error("handle_photo error: " + str(e), exc_info=True)
         await msg.edit_text("Terjadi error: " + str(e))
@@ -352,20 +457,15 @@ async def handle_konfirmasi_tanggal(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if query.data == "tgl_batal":
         user_data_temp.pop(user_id, None)
         await query.edit_message_text("Transaksi dibatalkan.")
         return ConversationHandler.END
-
     if user_id not in user_data_temp:
         await query.edit_message_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     data = user_data_temp[user_id]["data"]
-
     if query.data == "tgl_benar":
-        # Lanjut ke konfirmasi nominal
         await query.edit_message_text(
             "Tanggal: " + data["tanggal"] + " (dikonfirmasi)\n\n"
             "Konfirmasi nominal transaksi:\n"
@@ -374,39 +474,25 @@ async def handle_konfirmasi_tanggal(update: Update, context: ContextTypes.DEFAUL
             reply_markup=build_konfirmasi_keyboard("nom")
         )
         return KONFIRMASI_NOMINAL
-
     elif query.data == "tgl_ubah":
-        await query.edit_message_text(
-            "Ketik tanggal yang benar dengan format:\n"
-            "DD/MM/YYYY\n\n"
-            "Contoh: 04/06/2026"
-        )
+        await query.edit_message_text("Ketik tanggal yang benar:\nFormat: DD/MM/YYYY\nContoh: 04/06/2026")
         return INPUT_TANGGAL
 
 async def handle_input_tanggal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if user_id not in user_data_temp:
         await update.message.reply_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     tanggal = parse_tanggal(text)
-    if tanggal == datetime.now().strftime("%Y-%m-%d") and text != datetime.now().strftime("%d/%m/%Y"):
-        await update.message.reply_text(
-            "Format tanggal tidak valid.\n"
-            "Gunakan format DD/MM/YYYY\n"
-            "Contoh: 04/06/2026\n\n"
-            "Coba lagi:"
-        )
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
+        await update.message.reply_text("Format tidak valid.\nGunakan DD/MM/YYYY\nContoh: 04/06/2026\n\nCoba lagi:")
         return INPUT_TANGGAL
-
     user_data_temp[user_id]["data"]["tanggal"] = tanggal
     data = user_data_temp[user_id]["data"]
-
     await update.message.reply_text(
         "Tanggal diperbarui: " + tanggal + "\n\n"
-        "Konfirmasi nominal transaksi:\n"
+        "Konfirmasi nominal:\n"
         "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n\n"
         "Apakah nominal ini benar?",
         reply_markup=build_konfirmasi_keyboard("nom")
@@ -417,18 +503,14 @@ async def handle_konfirmasi_nominal(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if query.data == "nom_batal":
         user_data_temp.pop(user_id, None)
         await query.edit_message_text("Transaksi dibatalkan.")
         return ConversationHandler.END
-
     if user_id not in user_data_temp:
         await query.edit_message_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     data = user_data_temp[user_id]["data"]
-
     if query.data == "nom_benar":
         await query.edit_message_text(
             "Tanggal: " + data["tanggal"] + "\n"
@@ -437,39 +519,25 @@ async def handle_konfirmasi_nominal(update: Update, context: ContextTypes.DEFAUL
             reply_markup=build_kategori_keyboard()
         )
         return PILIH_KATEGORI
-
     elif query.data == "nom_ubah":
-        await query.edit_message_text(
-            "Ketik nominal yang benar (angka saja):\n\n"
-            "Contoh: 62500"
-        )
+        await query.edit_message_text("Ketik nominal yang benar (angka saja):\nContoh: 62500")
         return INPUT_NOMINAL
 
 async def handle_input_nominal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if user_id not in user_data_temp:
         await update.message.reply_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     jumlah_raw = re.sub(r'[^0-9]', '', text)
     if not jumlah_raw:
-        await update.message.reply_text(
-            "Format tidak valid. Ketik angka saja.\n"
-            "Contoh: 62500\n\n"
-            "Coba lagi:"
-        )
+        await update.message.reply_text("Format tidak valid. Ketik angka saja.\nContoh: 62500\n\nCoba lagi:")
         return INPUT_NOMINAL
-
     jumlah = int(jumlah_raw)
     user_data_temp[user_id]["data"]["jumlah"] = jumlah
     data = user_data_temp[user_id]["data"]
-
     await update.message.reply_text(
         "Nominal diperbarui: Rp " + "{:,}".format(jumlah) + "\n\n"
-        "Tanggal: " + data["tanggal"] + "\n"
-        "Nominal: Rp " + "{:,}".format(jumlah) + "\n\n"
         "Pilih kategori:",
         reply_markup=build_kategori_keyboard()
     )
@@ -479,25 +547,21 @@ async def handle_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if query.data == "kat_BATAL":
         user_data_temp.pop(user_id, None)
         await query.edit_message_text("Transaksi dibatalkan.")
         return ConversationHandler.END
-
     if user_id not in user_data_temp:
         await query.edit_message_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     kategori = query.data.replace("kat_", "")
     user_data_temp[user_id]["kategori"] = kategori
     data = user_data_temp[user_id]["data"]
-
     await query.edit_message_text(
         "Tanggal: " + data["tanggal"] + "\n"
         "Nominal: Rp " + "{:,}".format(data["jumlah"]) + "\n"
         "Kategori: " + kategori + "\n\n"
-        "Sekarang tulis deskripsi transaksi:\n"
+        "Tulis deskripsi transaksi:\n"
         "Contoh: bayar gaji, beli ATK, iuran RT"
     )
     return TULIS_DESKRIPSI
@@ -505,11 +569,9 @@ async def handle_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     deskripsi = update.message.text.strip()
-
     if user_id not in user_data_temp:
         await update.message.reply_text("Session expired. Kirim foto ulang.")
         return ConversationHandler.END
-
     temp = user_data_temp[user_id]
     data = temp["data"]
     data["kategori"] = temp["kategori"]
@@ -517,25 +579,22 @@ async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group = temp["group"]
     dicatat_oleh = temp["dicatat_oleh"]
     foto_hash = temp["foto_hash"]
+    foto_link = temp.get("foto_link", "")
     label = "Kas Besar" if group == "besar" else "Kas Kecil"
-
     try:
         dt = datetime.strptime(data["tanggal"], "%Y-%m-%d")
     except Exception:
         dt = datetime.now()
-
     try:
         ws = get_sheet(group, dt)
         if group == "besar":
-            append_kas_besar(ws, data, dicatat_oleh)
+            append_kas_besar(ws, data, dicatat_oleh, foto_link)
         else:
-            append_kas_kecil(ws, data, dicatat_oleh)
-
+            append_kas_kecil(ws, data, dicatat_oleh, foto_link)
         processed_hashes.add(foto_hash)
         user_data_temp.pop(user_id, None)
-
         sheet_name = get_sheet_name_besar(dt) if group == "besar" else get_sheet_name_kecil(dt)
-
+        foto_info = "\nLink foto: " + foto_link if foto_link else ""
         await update.message.reply_text(
             "Berhasil dicatat ke " + label + "!\n"
             "Sheet: " + sheet_name + "\n\n"
@@ -544,35 +603,217 @@ async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Deskripsi: " + deskripsi + "\n"
             "Kategori: " + data["kategori"] + "\n"
             "Jumlah: Rp " + "{:,}".format(data["jumlah"]) + "\n"
-            "Metode: " + data["metode"]
+            "Metode: " + data["metode"] + foto_info
         )
-
     except Exception as e:
         logger.error("handle_deskripsi error: " + str(e), exc_info=True)
-        await update.message.reply_text(
-            "Gagal menyimpan ke sheet.\n"
-            "Error: " + str(e)
-        )
+        await update.message.reply_text("Gagal menyimpan ke sheet.\nError: " + str(e))
+    return ConversationHandler.END
 
+# ── Handlers Edit ──
+
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+    user_id = update.effective_user.id
+    try:
+        ws = get_sheet(group)
+        transactions = get_all_transactions(ws, group)
+        if not transactions:
+            await update.message.reply_text("Belum ada transaksi yang bisa diedit.")
+            return ConversationHandler.END
+        user_data_temp[user_id] = {
+            "group": group,
+            "edit_mode": True,
+            "transactions": transactions,
+            "edit_page": 0,
+        }
+        keyboard, total_pages = build_transaksi_keyboard(transactions, 0, group)
+        await update.message.reply_text(
+            "Pilih transaksi yang ingin diedit:\n"
+            "Halaman 1/" + str(total_pages) + " (" + str(len(transactions)) + " transaksi)",
+            reply_markup=keyboard
+        )
+        return EDIT_PILIH_TRANSAKSI
+    except Exception as e:
+        logger.error("cmd_edit error: " + str(e))
+        await update.message.reply_text("Gagal memuat transaksi: " + str(e))
+        return ConversationHandler.END
+
+async def handle_edit_pilih_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "edit_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("Edit dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("Session expired.")
+        return ConversationHandler.END
+
+    # Handle pagination
+    if query.data.startswith("edit_page_"):
+        page = int(query.data.replace("edit_page_", ""))
+        user_data_temp[user_id]["edit_page"] = page
+        transactions = user_data_temp[user_id]["transactions"]
+        group = user_data_temp[user_id]["group"]
+        keyboard, total_pages = build_transaksi_keyboard(transactions, page, group)
+        await query.edit_message_text(
+            "Pilih transaksi yang ingin diedit:\n"
+            "Halaman " + str(page + 1) + "/" + str(total_pages) + " (" + str(len(transactions)) + " transaksi)",
+            reply_markup=keyboard
+        )
+        return EDIT_PILIH_TRANSAKSI
+
+    # Pilih transaksi
+    row_idx = int(query.data.replace("edit_trx_", ""))
+    transactions = user_data_temp[user_id]["transactions"]
+    trx = next((t for t in transactions if t["row_idx"] == row_idx), None)
+    if not trx:
+        await query.edit_message_text("Transaksi tidak ditemukan.")
+        return ConversationHandler.END
+
+    user_data_temp[user_id]["edit_row_idx"] = row_idx
+    user_data_temp[user_id]["edit_trx"] = trx
+
+    try:
+        nominal = int(float(re.sub(r'[^0-9.]', '', str(trx["nominal"] or 0))))
+    except Exception:
+        nominal = 0
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Deskripsi", callback_data="editfield_deskripsi")],
+        [InlineKeyboardButton("Kategori", callback_data="editfield_kategori")],
+        [InlineKeyboardButton("Nominal", callback_data="editfield_nominal")],
+        [InlineKeyboardButton("Tanggal", callback_data="editfield_tanggal")],
+        [InlineKeyboardButton("Batalkan", callback_data="editfield_batal")],
+    ])
+
+    await query.edit_message_text(
+        "Transaksi dipilih:\n\n"
+        "Tanggal: " + trx["tanggal"] + "\n"
+        "Vendor: " + trx["vendor"] + "\n"
+        "Deskripsi: " + trx["deskripsi"] + "\n"
+        "Kategori: " + trx["kategori"] + "\n"
+        "Nominal: Rp " + "{:,}".format(nominal) + "\n\n"
+        "Field mana yang ingin diedit?",
+        reply_markup=keyboard
+    )
+    return EDIT_PILIH_FIELD
+
+async def handle_edit_pilih_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "editfield_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("Edit dibatalkan.")
+        return ConversationHandler.END
+    if user_id not in user_data_temp:
+        await query.edit_message_text("Session expired.")
+        return ConversationHandler.END
+    field = query.data.replace("editfield_", "")
+    user_data_temp[user_id]["edit_field"] = field
+    if field == "kategori":
+        await query.edit_message_text("Pilih kategori baru:", reply_markup=build_kategori_keyboard())
+        return EDIT_INPUT_NILAI
+    prompts = {
+        "deskripsi": "Ketik deskripsi baru:\nContoh: bayar gaji bulan Juni",
+        "nominal": "Ketik nominal baru (angka saja):\nContoh: 150000",
+        "tanggal": "Ketik tanggal baru:\nFormat: DD/MM/YYYY\nContoh: 04/06/2026",
+    }
+    await query.edit_message_text(prompts.get(field, "Ketik nilai baru:"))
+    return EDIT_INPUT_NILAI
+
+async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    is_callback = update.callback_query is not None
+    user_id = update.callback_query.from_user.id if is_callback else update.effective_user.id
+
+    if is_callback:
+        query = update.callback_query
+        await query.answer()
+        if query.data == "kat_BATAL":
+            user_data_temp.pop(user_id, None)
+            await query.edit_message_text("Edit dibatalkan.")
+            return ConversationHandler.END
+        nilai_baru = query.data.replace("kat_", "")
+        reply = query.edit_message_text
+    else:
+        nilai_baru = update.message.text.strip()
+        reply = update.message.reply_text
+
+    if user_id not in user_data_temp:
+        await reply("Session expired.")
+        return ConversationHandler.END
+
+    temp = user_data_temp[user_id]
+    field = temp["edit_field"]
+    row_idx = temp["edit_row_idx"]
+    group = temp["group"]
+    editor = update.effective_user.first_name or "Admin"
+
+    if field == "nominal":
+        nilai_baru_clean = re.sub(r'[^0-9]', '', nilai_baru)
+        if not nilai_baru_clean:
+            await reply("Format tidak valid. Ketik angka saja.\nCoba lagi:")
+            return EDIT_INPUT_NILAI
+        nilai_baru = nilai_baru_clean
+    elif field == "tanggal":
+        nilai_baru = parse_tanggal(nilai_baru)
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', nilai_baru):
+            await reply("Format tidak valid.\nGunakan DD/MM/YYYY\nCoba lagi:")
+            return EDIT_INPUT_NILAI
+
+    try:
+        ws = get_sheet(group)
+        edit_label = "EDITED - " + datetime.now().strftime("%d/%m/%Y, %H.%M.%S") + " by " + editor
+
+        if group == "besar":
+            field_col_map = {"deskripsi": 7, "kategori": 6, "nominal": 4, "tanggal": 8}
+            status_col = 11
+        else:
+            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9}
+            status_col = 12
+
+        col_idx = field_col_map.get(field)
+        if col_idx:
+            ws.update_cell(row_idx, col_idx, nilai_baru)
+        ws.update_cell(row_idx, status_col, edit_label)
+
+        user_data_temp.pop(user_id, None)
+        await reply(
+            "Berhasil diedit!\n\n"
+            "Field: " + field.capitalize() + "\n"
+            "Nilai baru: " + str(nilai_baru) + "\n"
+            "Diedit oleh: " + editor + "\n"
+            "Waktu: " + datetime.now().strftime("%d/%m/%Y %H:%M") + "\n\n"
+            "Kolom Status di sheet sudah diperbarui."
+        )
+    except Exception as e:
+        logger.error("handle_edit_input_nilai error: " + str(e), exc_info=True)
+        await reply("Gagal mengedit: " + str(e))
     return ConversationHandler.END
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data_temp.pop(user_id, None)
-    await update.message.reply_text("Transaksi dibatalkan.")
+    await update.message.reply_text("Proses dibatalkan.")
     return ConversationHandler.END
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Kirim foto struk untuk mencatat pengeluaran.\n"
-        "Perintah: /cek /total /start /batal"
+        "Perintah: /cek /total /edit /start /batal"
     )
 
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
 
-    conv_handler = ConversationHandler(
+    input_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, handle_photo)],
         states={
             KONFIRMASI_TANGGAL: [CallbackQueryHandler(handle_konfirmasi_tanggal, pattern="^tgl_")],
@@ -583,11 +824,25 @@ def main():
             TULIS_DESKRIPSI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_deskripsi)],
         },
         fallbacks=[CommandHandler("batal", handle_cancel)],
-        per_chat=False,
-        per_user=True,
+        per_chat=False, per_user=True,
     )
 
-    app.add_handler(conv_handler)
+    edit_handler = ConversationHandler(
+        entry_points=[CommandHandler("edit", cmd_edit)],
+        states={
+            EDIT_PILIH_TRANSAKSI: [CallbackQueryHandler(handle_edit_pilih_transaksi, pattern="^edit_")],
+            EDIT_PILIH_FIELD: [CallbackQueryHandler(handle_edit_pilih_field, pattern="^editfield_")],
+            EDIT_INPUT_NILAI: [
+                CallbackQueryHandler(handle_edit_input_nilai, pattern="^kat_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_input_nilai),
+            ],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
+    app.add_handler(input_handler)
+    app.add_handler(edit_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cek", cmd_cek))
     app.add_handler(CommandHandler("total", cmd_total))
