@@ -34,7 +34,7 @@ EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 
 # Admin yang boleh delete transaksi
-ADMIN_IDS = [5418153944, 5489011072]
+ADMIN_IDS = [5418153944]
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -189,7 +189,27 @@ def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
     logger.info(f"[SHEET] Append kas besar, foto_link: '{foto_link}'")
     ws.append_row(row)
 
-def get_saldo_besar(ws):
+def recalculate_saldo(ws):
+    """Hitung ulang semua saldo di sheet dari atas ke bawah"""
+    try:
+        rows = ws.get_all_values()
+        saldo = 0
+        updates = []
+        for i, row in enumerate(rows[1:], start=2):
+            if not row or not row[0]:
+                continue
+            debet  = float(re.sub(r'[^0-9]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            saldo  = saldo + kredit - debet
+            updates.append({
+                "range": f"G{i}",
+                "values": [[fmt_rupiah(saldo)]]
+            })
+        if updates:
+            ws.batch_update(updates)
+        logger.info(f"[SALDO] Recalculate selesai, {len(updates)} baris diupdate")
+    except Exception as e:
+        logger.error(f"[SALDO] Recalculate gagal: {e}", exc_info=True)
     rows = ws.get_all_values()
     saldo = 0
     for row in rows[1:]:
@@ -951,7 +971,8 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
         if not nilai_baru_clean:
             await reply("❌ Format tidak valid. Ketik angka saja.\nCoba lagi:")
             return EDIT_INPUT_NILAI
-        nilai_baru = nilai_baru_clean
+        # Simpan dengan format Rp supaya konsisten
+        nilai_baru = fmt_rupiah(int(nilai_baru_clean))
 
     elif field == "tanggal":
         nilai_baru = parse_tanggal(nilai_baru)
@@ -975,6 +996,10 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
             ws.update_cell(row_idx, col_idx, nilai_baru)
         ws.update_cell(row_idx, status_col, edit_label)
 
+        # Recalculate saldo semua baris setelah edit nominal
+        if field == "nominal":
+            recalculate_saldo(ws)
+
         user_data_temp.pop(user_id, None)
         await reply(
             f"✅ Berhasil diedit!\n\n"
@@ -982,7 +1007,7 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
             f"Nilai baru: {nilai_baru}\n"
             f"Diedit oleh: {editor}\n"
             f"Waktu: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"Kolom Status di sheet sudah diperbarui."
+            f"Kolom Status & Saldo di sheet sudah diperbarui."
         )
 
     except Exception as e:
@@ -1160,8 +1185,11 @@ async def handle_delete_konfirmasi(update: Update, context: ContextTypes.DEFAULT
         # Catat ke log delete dulu sebelum hapus
         catat_log_delete(group, trx, deleted_by)
 
-        # Hapus baris dari sheet (ganti semua kolom jadi kosong)
+        # Hapus baris dari sheet
         ws.delete_rows(row_idx)
+
+        # Recalculate saldo semua baris setelah delete
+        recalculate_saldo(ws)
 
         user_data_temp.pop(user_id, None)
         await query.edit_message_text(
@@ -1169,7 +1197,8 @@ async def handle_delete_konfirmasi(update: Update, context: ContextTypes.DEFAULT
             f"📝 Deskripsi: {trx['deskripsi']}\n"
             f"📂 Kategori: {trx['kategori']}\n"
             f"🕐 Dihapus oleh: {deleted_by}\n"
-            f"📋 Log tersimpan di sheet 'Log Delete'"
+            f"📋 Log tersimpan di sheet 'Log Delete'\n"
+            f"📊 Saldo semua baris sudah diupdate otomatis."
         )
 
     except Exception as e:
