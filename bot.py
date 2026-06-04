@@ -102,8 +102,13 @@ Jumlah harus berupa angka tanpa titik/koma."""
     )
 
     text = response.content[0].text.strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text)
+text = text.replace("```json", "").replace("```", "").strip()
+# Cari JSON di dalam text
+import re
+match = re.search(r'\{.*\}', text, re.DOTALL)
+if match:
+    text = match.group()
+return json.loads(text)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
