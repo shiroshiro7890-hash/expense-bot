@@ -34,7 +34,7 @@ EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 
 # Admin yang boleh delete transaksi
-ADMIN_IDS = [5418153944]
+ADMIN_IDS = [5418153944, 5489011072]
 
 KATEGORI = [
     "Operational", "Perlengkapan",
