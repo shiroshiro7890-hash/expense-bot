@@ -211,6 +211,20 @@ def recalculate_saldo(ws):
     except Exception as e:
         logger.error(f"[SALDO] Recalculate gagal: {e}", exc_info=True)
 
+def get_saldo_besar(ws):
+    rows = ws.get_all_values()
+    saldo = 0
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        try:
+            debet  = float(re.sub(r'[^0-9]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            saldo  = saldo + kredit - debet
+        except Exception:
+            continue
+    return saldo
+
 def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
     saldo = get_saldo_kecil(ws)
     jenis_masuk = data["kategori"] in ["Pendapatan", "Modal Usaha"]
