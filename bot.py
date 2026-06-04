@@ -135,7 +135,7 @@ def analyze_image(image_bytes):
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                {"type": "text", "text": 'Analisa struk ini. Kembalikan HANYA JSON:\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat\nHanya JSON, tidak ada teks lain'}
+                {"type": "text", "text": 'Analisa struk ini. Kembalikan HANYA JSON:\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\nATURAN TANGGAL:\n- Format output WAJIB YYYY-MM-DD\n- Struk tulis 01-06-2026 atau 01/06/2026 = output 2026-06-01\n- Tahun HARUS 4 digit penuh (2026 bukan 26)\n\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat tanpa titik/koma\nHanya JSON, tidak ada teks lain'}
             ]
         }]
     )
@@ -145,7 +145,17 @@ def analyze_image(image_bytes):
     data = parse_json_safe(raw)
 
     tanggal = str(data.get("tanggal") or "").strip()
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
+
+    # Validasi dan konversi format tanggal
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
+        tahun = int(tanggal[:4])
+        if tahun < 2020 or tahun > 2030:
+            tanggal = datetime.now().strftime("%Y-%m-%d")
+    elif re.match(r'^\d{2}[-/]\d{2}[-/]\d{4}$', tanggal):
+        sep = '-' if '-' in tanggal else '/'
+        parts = tanggal.split(sep)
+        tanggal = parts[2] + '-' + parts[1] + '-' + parts[0]
+    else:
         tanggal = datetime.now().strftime("%Y-%m-%d")
 
     jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
