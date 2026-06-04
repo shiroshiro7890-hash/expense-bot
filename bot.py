@@ -29,8 +29,8 @@ SCOPES = [
 BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
          "Juli","Agustus","September","Oktober","November","Desember"]
 
-KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI = range(6)
-EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(6, 9)
+KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI, INPUT_REKENING, INPUT_PENERIMA = range(8)
+EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -177,8 +177,8 @@ def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
         fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
         data["tanggal"],        # I - Tanggal Invoice
-        "",                     # J - Rekening
-        "",                     # K - Penerima
+        data.get("rekening", ""),  # J - Rekening
+        data.get("penerima", ""),  # K - Penerima
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # L - Status
         foto_link               # M - Link Foto
     ]
@@ -219,8 +219,8 @@ def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
         fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
         data["tanggal"],        # I - Tanggal Invoice
-        "",                     # J - Rekening
-        "",                     # K - Penerima
+        data.get("rekening", ""),  # J - Rekening
+        data.get("penerima", ""),  # K - Penerima
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # L - Status
         foto_link               # M - Link Foto
     ]
@@ -685,16 +685,53 @@ async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Session expired. Kirim foto ulang.")
         return ConversationHandler.END
 
+    user_data_temp[user_id]["data"]["deskripsi"] = deskripsi
+
+    await update.message.reply_text(
+        f"📝 Deskripsi: {deskripsi}\n\n"
+        f"🏦 Masukkan nomor rekening tujuan:\n"
+        f"Contoh: 1234567890\n"
+        f"(Ketik '-' jika tunai/tidak ada rekening)"
+    )
+    return INPUT_REKENING
+
+async def handle_input_rekening(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    rekening = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
+    user_data_temp[user_id]["rekening"] = rekening
+
+    await update.message.reply_text(
+        f"🏦 Rekening: {rekening}\n\n"
+        f"👤 Masukkan nama penerima:\n"
+        f"Contoh: PT Sumber Makmur\n"
+        f"(Ketik '-' jika tidak ada)"
+    )
+    return INPUT_PENERIMA
+
+async def handle_input_penerima(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    penerima = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired. Kirim foto ulang.")
+        return ConversationHandler.END
+
     temp = user_data_temp[user_id]
     data = temp["data"]
     data["kategori"] = temp["kategori"]
-    data["deskripsi"] = deskripsi
+    data["rekening"] = temp["rekening"]
+    data["penerima"] = penerima
     group = temp["group"]
     dicatat_oleh = temp["dicatat_oleh"]
     foto_hash = temp["foto_hash"]
     foto_link = temp.get("foto_link", "")
 
-    logger.info(f"[DESKRIPSI] Menyimpan ke sheet, foto_link: '{foto_link}'")
+    logger.info(f"[PENERIMA] Menyimpan ke sheet, foto_link: '{foto_link}'")
 
     label = "Kas Besar" if group == "besar" else "Kas Kecil"
     try:
@@ -713,22 +750,24 @@ async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data_temp.pop(user_id, None)
 
         sheet_name = get_sheet_name_besar(dt) if group == "besar" else get_sheet_name_kecil(dt)
-        foto_info = f"\n🔗 Link foto: {foto_link}" if foto_link else "\n⚠️ Foto tidak terupload ke Drive"
+        foto_info = f"\n🔗 Link foto: {foto_link}" if foto_link else "\n⚠️ Foto tidak terupload"
 
         await update.message.reply_text(
             f"✅ Berhasil dicatat ke {label}!\n"
             f"📊 Sheet: {sheet_name}\n\n"
             f"📅 Tanggal: {data['tanggal']}\n"
             f"🏪 Vendor: {data['vendor']}\n"
-            f"📝 Deskripsi: {deskripsi}\n"
+            f"📝 Deskripsi: {data['deskripsi']}\n"
             f"📂 Kategori: {data['kategori']}\n"
             f"💰 Jumlah: {fmt_rupiah(data['jumlah'])}\n"
-            f"💳 Metode: {data['metode']}"
+            f"💳 Metode: {data['metode']}\n"
+            f"🏦 Rekening: {data['rekening']}\n"
+            f"👤 Penerima: {data['penerima']}"
             f"{foto_info}"
         )
 
     except Exception as e:
-        logger.error(f"[DESKRIPSI] Error simpan sheet: {e}", exc_info=True)
+        logger.error(f"[PENERIMA] Error simpan sheet: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Gagal menyimpan ke sheet.\nError: {e}")
 
     return ConversationHandler.END
@@ -963,6 +1002,8 @@ def main():
             INPUT_NOMINAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_nominal)],
             PILIH_KATEGORI: [CallbackQueryHandler(handle_kategori, pattern="^kat_")],
             TULIS_DESKRIPSI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_deskripsi)],
+            INPUT_REKENING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_rekening)],
+            INPUT_PENERIMA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_penerima)],
         },
         fallbacks=[CommandHandler("batal", handle_cancel)],
         per_chat=False,
