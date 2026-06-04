@@ -43,6 +43,13 @@ PAGE_SIZE = 10
 processed_hashes = set()
 user_data_temp = {}
 
+def fmt_rupiah(angka):
+    """Format angka ke Rp 62.500 (format Indonesia)"""
+    try:
+        return "Rp " + f"{int(angka):,}".replace(",", ".")
+    except Exception:
+        return "Rp 0"
+
 # ─────────────────────────────────────────
 # Google Auth
 # ─────────────────────────────────────────
@@ -157,7 +164,7 @@ def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
         tgl,                    # A - Tanggal catat
         dicatat_oleh,           # B - Admin
         data["vendor"],         # C - Vendor
-        data["jumlah"],         # D - Nominal
+        fmt_rupiah(data["jumlah"]),  # D - Nominal
         jenis,                  # E - Jenis
         data["kategori"],       # F - Kategori
         data["deskripsi"],      # G - Deskripsi
@@ -185,9 +192,9 @@ def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
         dicatat_oleh,           # B - Admin
         data["deskripsi"],      # C - Deskripsi
         data["kategori"],       # D - Kategori
-        debet,                  # E - Debet
-        kredit,                 # F - Kredit
-        saldo_baru,             # G - Saldo
+        debet,                  # E - Debet (tetap angka untuk kalkulasi saldo)
+        kredit,                 # F - Kredit (tetap angka untuk kalkulasi saldo)
+        fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
         data["tanggal"],        # I - Tanggal Invoice
         "",                     # J - Rekening
@@ -361,7 +368,7 @@ def build_transaksi_keyboard(transactions, page, group):
     for trx in page_data:
         try:
             nominal = int(float(re.sub(r'[^0-9.]', '', str(trx["nominal"] or 0))))
-            label_btn = f"{trx['tanggal']} | {(trx['deskripsi'] or trx['vendor'])[:18]} | Rp {nominal:,}"
+            label_btn = f"{trx['tanggal']} | {(trx['deskripsi'] or trx['vendor'])[:18]} | {fmt_rupiah(nominal)}"
         except Exception:
             label_btn = f"{trx['tanggal']} | {(trx['deskripsi'] or '')[:25]}"
         keyboard.append([InlineKeyboardButton(label_btn, callback_data=f"edit_trx_{trx['row_idx']}")])
@@ -413,10 +420,10 @@ async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 if group == "besar":
                     nominal = int(float(re.sub(r'[^0-9.]', '', str(row[3] or 0))))
-                    text += f"- {row[0]} | {row[5]}\n  {row[6]}\n  Rp {nominal:,}\n\n"
+                    text += f"- {row[0]} | {row[5]}\n  {row[6]}\n  {fmt_rupiah(nominal)}\n\n"
                 else:
                     debet = int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
-                    text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  Rp {debet:,}\n\n"
+                    text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  {fmt_rupiah(debet)}\n\n"
             except Exception:
                 text += f"- {row[0]}\n\n"
         await update.message.reply_text(text)
@@ -446,7 +453,7 @@ async def cmd_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Total {label}\n"
             f"Sheet: {sheet_name}\n\n"
-            f"Total: Rp {total:,}\n"
+            f"Total: {fmt_rupiah(total)}\n"
             f"Transaksi: {count}"
         )
     except Exception as e:
@@ -526,7 +533,7 @@ async def handle_konfirmasi_tanggal(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(
             f"✅ Tanggal: {data['tanggal']} (dikonfirmasi)\n\n"
             f"💰 Konfirmasi nominal transaksi:\n"
-            f"Nominal: Rp {data['jumlah']:,}\n\n"
+            f"Nominal: {fmt_rupiah(data['jumlah'])}\n\n"
             f"Apakah nominal ini benar?",
             reply_markup=build_konfirmasi_keyboard("nom")
         )
@@ -560,7 +567,7 @@ async def handle_input_tanggal(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(
         f"✅ Tanggal diperbarui: {tanggal}\n\n"
         f"💰 Konfirmasi nominal:\n"
-        f"Nominal: Rp {data['jumlah']:,}\n\n"
+        f"Nominal: {fmt_rupiah(data['jumlah'])}\n\n"
         f"Apakah nominal ini benar?",
         reply_markup=build_konfirmasi_keyboard("nom")
     )
@@ -585,7 +592,7 @@ async def handle_konfirmasi_nominal(update: Update, context: ContextTypes.DEFAUL
     if query.data == "nom_benar":
         await query.edit_message_text(
             f"✅ Tanggal: {data['tanggal']}\n"
-            f"✅ Nominal: Rp {data['jumlah']:,}\n\n"
+            f"✅ Nominal: {fmt_rupiah(data['jumlah'])}\n\n"
             f"📂 Pilih kategori:",
             reply_markup=build_kategori_keyboard()
         )
@@ -616,7 +623,7 @@ async def handle_input_nominal(update: Update, context: ContextTypes.DEFAULT_TYP
     user_data_temp[user_id]["data"]["jumlah"] = jumlah
     data = user_data_temp[user_id]["data"]
     await update.message.reply_text(
-        f"✅ Nominal diperbarui: Rp {jumlah:,}\n\n"
+        f"✅ Nominal diperbarui: {fmt_rupiah(jumlah)}\n\n"
         f"📂 Pilih kategori:",
         reply_markup=build_kategori_keyboard()
     )
@@ -641,7 +648,7 @@ async def handle_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = user_data_temp[user_id]["data"]
     await query.edit_message_text(
         f"✅ Tanggal: {data['tanggal']}\n"
-        f"✅ Nominal: Rp {data['jumlah']:,}\n"
+        f"✅ Nominal: {fmt_rupiah(data['jumlah'])}\n"
         f"✅ Kategori: {kategori}\n\n"
         f"✏️ Tulis deskripsi transaksi:\n"
         f"Contoh: bayar gaji, beli ATK, iuran RT"
@@ -693,7 +700,7 @@ async def handle_deskripsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏪 Vendor: {data['vendor']}\n"
             f"📝 Deskripsi: {deskripsi}\n"
             f"📂 Kategori: {data['kategori']}\n"
-            f"💰 Jumlah: Rp {data['jumlah']:,}\n"
+            f"💰 Jumlah: {fmt_rupiah(data['jumlah'])}\n"
             f"💳 Metode: {data['metode']}"
             f"{foto_info}"
         )
@@ -794,7 +801,7 @@ async def handle_edit_pilih_transaksi(update: Update, context: ContextTypes.DEFA
         f"🏪 Vendor: {trx['vendor']}\n"
         f"📝 Deskripsi: {trx['deskripsi']}\n"
         f"📂 Kategori: {trx['kategori']}\n"
-        f"💰 Nominal: Rp {nominal:,}\n\n"
+        f"💰 Nominal: {fmt_rupiah(nominal)}\n\n"
         f"Field mana yang ingin diedit?",
         reply_markup=keyboard
     )
