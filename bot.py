@@ -32,6 +32,7 @@ BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
 KONFIRMASI_TANGGAL, INPUT_TANGGAL, KONFIRMASI_NOMINAL, INPUT_NOMINAL, PILIH_KATEGORI, TULIS_DESKRIPSI, INPUT_REKENING, INPUT_PENERIMA = range(8)
 EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
+RESET_KONFIRMASI = 13
 
 # Admin yang boleh delete transaksi
 ADMIN_IDS = [5418153944]
@@ -180,7 +181,7 @@ def append_kas_besar(ws, data, dicatat_oleh, foto_link=""):
         fmt_rupiah(kredit),     # F - Kredit (Masuk)
         fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
-        data["tanggal"],        # I - Tanggal Invoice
+        format_tanggal_invoice(data["tanggal"]),  # I - Tanggal Invoice DD/MM/YYYY
         data.get("rekening", ""),  # J - Rekening
         data.get("penerima", ""),  # K - Penerima
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # L - Status
@@ -244,7 +245,7 @@ def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
         fmt_rupiah(kredit),     # F - Kredit
         fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
-        data["tanggal"],        # I - Tanggal Invoice
+        format_tanggal_invoice(data["tanggal"]),  # I - Tanggal Invoice DD/MM/YYYY
         data.get("rekening", ""),  # J - Rekening
         data.get("penerima", ""),  # K - Penerima
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M"),  # L - Status
@@ -311,6 +312,14 @@ def format_tanggal_display(tanggal_str):
     try:
         dt = datetime.strptime(tanggal_str, "%Y-%m-%d")
         return dt.strftime("%d %B %Y")
+    except Exception:
+        return tanggal_str
+
+def format_tanggal_invoice(tanggal_str):
+    """Konversi YYYY-MM-DD ke DD/MM/YYYY untuk konsistensi di sheet"""
+    try:
+        dt = datetime.strptime(tanggal_str, "%Y-%m-%d")
+        return dt.strftime("%d/%m/%Y")
     except Exception:
         return tanggal_str
 
@@ -458,10 +467,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Halo! Saya bot pencatat {label}\n"
         f"Sheet aktif: {sheet_name}\n\n"
         f"Perintah:\n"
-        f"/cek - Semua transaksi bulan ini\n"
+        f"/cek - 10 transaksi terbaru\n"
         f"/total - Total bulan ini\n"
         f"/edit - Edit transaksi\n"
         f"/delete - Hapus transaksi (admin)\n"
+        f"/reset_bulan - Reset semua data bulan ini (admin)\n"
         f"/batal - Batalkan proses"
     )
 
@@ -1234,6 +1244,131 @@ async def handle_delete_konfirmasi(update: Update, context: ContextTypes.DEFAULT
 
     return ConversationHandler.END
 
+# ─────────────────────────────────────────
+# Reset Bulan Handler
+# ─────────────────────────────────────────
+
+async def cmd_reset_bulan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Hanya admin yang bisa reset
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text(
+            "⛔ Kamu tidak punya akses untuk reset data.\n"
+            "Fitur ini hanya untuk admin."
+        )
+        return ConversationHandler.END
+
+    chat = update.effective_chat
+    group = get_group_type(chat.title or "")
+    sheet_name = get_sheet_name_besar() if group == "besar" else get_sheet_name_kecil()
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
+
+    user_data_temp[user_id] = {"group": group, "reset_mode": True}
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Ya, Hapus Semua Data Bulan Ini", callback_data="reset_ya")],
+        [InlineKeyboardButton("❌ Batal", callback_data="reset_batal")],
+    ])
+
+    await update.message.reply_text(
+        f"⚠️ PERINGATAN — Reset Data Bulan Ini\n\n"
+        f"Sheet: {sheet_name}\n"
+        f"Grup: {label}\n\n"
+        f"Semua transaksi bulan ini akan dihapus permanen.\n"
+        f"Data yang sudah dihapus TIDAK bisa dikembalikan!\n\n"
+        f"Ketik nama sheet untuk konfirmasi:\n"
+        f"➡️ {sheet_name}",
+        reply_markup=keyboard
+    )
+    return RESET_KONFIRMASI
+
+async def handle_reset_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "reset_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Reset dibatalkan. Data aman.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    group = user_data_temp[user_id]["group"]
+    deleted_by = update.effective_user.first_name or "Admin"
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
+    sheet_name = get_sheet_name_besar() if group == "besar" else get_sheet_name_kecil()
+
+    try:
+        ws = get_sheet(group)
+        rows = ws.get_all_values()
+        data_rows = [r for r in rows[1:] if r and r[0]]
+        total = len(data_rows)
+
+        if total == 0:
+            user_data_temp.pop(user_id, None)
+            await query.edit_message_text("ℹ️ Tidak ada data untuk dihapus.")
+            return ConversationHandler.END
+
+        # Catat semua ke log delete dulu
+        gc = get_gspread_client()
+        if group == "kecil":
+            sid = os.environ["SPREADSHEET_ID_KAS_KECIL"]
+        else:
+            sid = os.environ["SPREADSHEET_ID_KAS_BESAR"]
+        sh = gc.open_by_key(sid)
+
+        try:
+            ws_log = sh.worksheet("Log Delete")
+        except gspread.WorksheetNotFound:
+            ws_log = sh.add_worksheet(title="Log Delete", rows=1000, cols=10)
+            ws_log.append_row([
+                "Waktu Delete", "Dihapus Oleh", "Group",
+                "Tanggal Transaksi", "Deskripsi", "Kategori",
+                "Nominal", "Vendor", "Status Lama"
+            ])
+
+        log_rows = []
+        for row in data_rows:
+            log_rows.append([
+                datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                f"{deleted_by} (RESET BULAN)",
+                label,
+                row[0] if len(row) > 0 else "",
+                row[2] if len(row) > 2 else "",
+                row[3] if len(row) > 3 else "",
+                row[4] if len(row) > 4 else "",
+                row[7] if len(row) > 7 else "",
+                row[11] if len(row) > 11 else "",
+            ])
+        if log_rows:
+            ws_log.append_rows(log_rows)
+
+        # Hapus semua data (baris 2 sampai akhir), pertahankan header
+        if len(rows) > 1:
+            ws.delete_rows(2, len(rows))
+
+        user_data_temp.pop(user_id, None)
+        logger.info(f"[RESET] {total} baris dihapus oleh {deleted_by} dari {sheet_name}")
+
+        await query.edit_message_text(
+            f"✅ Reset berhasil!\n\n"
+            f"📊 Sheet: {sheet_name}\n"
+            f"🗑️ Total dihapus: {total} transaksi\n"
+            f"👤 Direset oleh: {deleted_by}\n"
+            f"📋 Semua data tercatat di sheet 'Log Delete'\n\n"
+            f"Sheet sekarang kosong dan siap diisi ulang."
+        )
+
+    except Exception as e:
+        logger.error(f"[RESET] Gagal reset: {e}", exc_info=True)
+        await query.edit_message_text(f"❌ Gagal reset: {e}")
+
+    return ConversationHandler.END
+
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data_temp.pop(user_id, None)
@@ -1243,7 +1378,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Kirim foto struk untuk mencatat pengeluaran.\n"
-        "Perintah: /cek /total /edit /delete /start /batal"
+        "Perintah: /cek /total /edit /delete /reset_bulan /start /batal"
     )
 
 # ─────────────────────────────────────────
@@ -1297,9 +1432,20 @@ def main():
         per_user=True,
     )
 
+    reset_handler = ConversationHandler(
+        entry_points=[CommandHandler("reset_bulan", cmd_reset_bulan)],
+        states={
+            RESET_KONFIRMASI: [CallbackQueryHandler(handle_reset_konfirmasi, pattern="^reset_")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False,
+        per_user=True,
+    )
+
     app.add_handler(input_handler)
     app.add_handler(edit_handler)
     app.add_handler(delete_handler)
+    app.add_handler(reset_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cek", cmd_cek))
     app.add_handler(CommandHandler("total", cmd_total))
