@@ -90,7 +90,7 @@ Jika jumlah tidak jelas, isi 0.
 Jumlah harus berupa angka tanpa titik/koma."""
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=500,
         messages=[{
             "role": "user",
