@@ -855,6 +855,7 @@ async def handle_edit_pilih_transaksi(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("📅 Tanggal", callback_data="editfield_tanggal")],
         [InlineKeyboardButton("🏦 Rekening", callback_data="editfield_rekening")],
         [InlineKeyboardButton("👤 Penerima", callback_data="editfield_penerima")],
+        [InlineKeyboardButton("⛔ Saldo (otomatis, tidak bisa diedit)", callback_data="editfield_saldo")],
         [InlineKeyboardButton("❌ Batalkan", callback_data="editfield_batal")],
     ])
 
@@ -886,6 +887,18 @@ async def handle_edit_pilih_field(update: Update, context: ContextTypes.DEFAULT_
 
     field = query.data.replace("editfield_", "")
     user_data_temp[user_id]["edit_field"] = field
+
+    # Saldo tidak boleh diedit manual
+    if field == "saldo":
+        await query.edit_message_text(
+            "⛔ Kolom Saldo tidak bisa diedit manual!\n\n"
+            "Saldo dihitung otomatis oleh bot berdasarkan Debet & Kredit.\n"
+            "Jika ingin koreksi saldo, gunakan cara berikut:\n\n"
+            "1. Edit nominal transaksi yang salah via tombol 💰 Nominal\n"
+            "2. Atau tambah transaksi koreksi baru lewat bot\n\n"
+            "Kirim /edit untuk kembali ke menu edit."
+        )
+        return ConversationHandler.END
 
     if field == "kategori":
         await query.edit_message_text("📂 Pilih kategori baru:", reply_markup=build_kategori_keyboard())
