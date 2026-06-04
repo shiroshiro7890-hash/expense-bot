@@ -12,19 +12,40 @@ from google.oauth2.service_account import Credentials
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Google Sheets setup ──
 SCOPES = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-def get_sheet():
+def get_credentials():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     creds_dict = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+
+def detect_group(chat_title: str) -> str:
+    """Deteksi group berdasarkan nama: 'besar' atau 'petty/kecil'"""
+    title = (chat_title or "").lower()
+    if "besar" in title:
+        return "besar"
+    elif "petty" in title or "kecil" in title:
+        return "kecil"
+    return "besar"  # default
+
+def get_sheet(group: str):
+    """Ambil worksheet berdasarkan group"""
+    creds = get_credentials()
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(os.environ["SPREADSHEET_ID"])
+
+    if group == "kecil":
+        spreadsheet_id = os.environ["SPREADSHEET_ID_KAS_KECIL"]
+        sheet_title = "Expense Bot Kas Kecil"
+    else:
+        spreadsheet_id = os.environ["SPREADSHEET_ID_KAS_BESAR"]
+        sheet_title = "Expense Bot Kas Besar"
+
+    sh = gc.open_by_key(spreadsheet_id)
+
     try:
-        ws = sh.worksheet("Expense Bot")
+        ws = sh.worksheet(sheet_title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="Expense Bot", rows=1000, cols=10)
+        ws = sh.add_worksheet(title=sheet_title, rows=1000, cols=10)
         ws.append_row(["No", "Tanggal", "Deskripsi", "Kategori", "Jumlah (Rp)", "Metode Pembayaran", "Keterangan", "Dicatat"])
         ws.format("A1:H1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
@@ -32,7 +53,6 @@ def get_sheet():
         })
     return ws
 
-# ── Claude Vision: extract expense from image ──
 def extract_expense_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -85,28 +105,43 @@ Jumlah harus berupa angka tanpa titik/koma."""
     text = text.replace("```json", "").replace("```", "").strip()
     return json.loads(text)
 
-# ── Handlers ──
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    group = detect_group(chat.title or "")
+    label = "Kas Besar" if group == "besar" else "Kas Kecil"
+
     await update.message.reply_text(
-        "👋 Halo! Gw bot pencatat expense kamu.\n\n"
-        "📸 Kirim foto struk/bon → gw otomatis catat ke Google Sheets!\n\n"
-        "Perintah:\n"
-        "/start - Mulai\n"
-        "/cek - Lihat 5 expense terakhir"
+        f"👋 Halo! Gw bot pencatat expense untuk *{label}*.\n\n"
+        f"📸 Kirim foto struk/bon → gw otomatis catat ke Google Sheets!\n\n"
+        f"Perintah:\n"
+        f"/start - Mulai\n"
+        f"/cek - Lihat 5 expense terakhir",
+        parse_mode="Markdown"
     )
 
 async def cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        ws = get_sheet()
+        chat = update.effective_chat
+        group = detect_group(chat.title or "")
+        ws = get_sheet(group)
         data = ws.get_all_values()
+
         if len(data) <= 1:
             await update.message.reply_text("📭 Belum ada data expense.")
             return
-        rows = data[-5:]
-        text = "📋 *5 Expense Terakhir:*\n\n"
+
+        rows = data[1:][-5:]  # 5 terakhir, skip header
+        label = "Kas Besar" if group == "besar" else "Kas Kecil"
+        text = f"📋 *5 Expense Terakhir ({label}):*\n\n"
+
         for row in rows:
             if len(row) >= 5 and row[0] != "No":
-                text += f"• {row[1]} | {row[3]} | Rp {int(row[4]):,}\n  _{row[2]}_\n\n"
+                try:
+                    jumlah = int(float(row[4]))
+                    text += f"• {row[1]} | {row[3]} | Rp {jumlah:,}\n  _{row[2]}_\n\n"
+                except:
+                    text += f"• {row[1]} | {row[3]} | {row[4]}\n  _{row[2]}_\n\n"
+
         await update.message.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Cek error: {e}")
@@ -115,13 +150,17 @@ async def cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Lagi analisa struk-nya, tunggu sebentar...")
     try:
+        chat = update.effective_chat
+        group = detect_group(chat.title or "")
+        label = "Kas Besar" if group == "besar" else "Kas Kecil"
+
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
         data = extract_expense_from_image(bytes(image_bytes))
 
-        ws = get_sheet()
+        ws = get_sheet(group)
         all_rows = ws.get_all_values()
         no = len(all_rows)
 
@@ -139,7 +178,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws.append_row(row)
 
         konfirmasi = (
-            f"✅ *Expense berhasil dicatat!*\n\n"
+            f"✅ *Expense berhasil dicatat! ({label})*\n\n"
             f"📅 Tanggal: {row[1]}\n"
             f"📝 Deskripsi: {row[2]}\n"
             f"🏷️ Kategori: {row[3]}\n"
