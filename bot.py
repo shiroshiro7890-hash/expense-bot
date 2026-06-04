@@ -3,6 +3,7 @@ import json
 import base64
 import logging
 import re
+import hashlib
 from datetime import datetime
 
 import anthropic
@@ -22,13 +23,16 @@ SCOPES = [
 BULAN = ["Januari","Februari","Maret","April","Mei","Juni",
          "Juli","Agustus","September","Oktober","November","Desember"]
 
-def get_sheet_name_besar():
-    now = datetime.now()
-    return "Rekap " + BULAN[now.month-1] + " " + str(now.year)
+# Cache hash foto untuk cegah duplikat (reset saat bot restart)
+processed_hashes = set()
 
-def get_sheet_name_kecil():
-    now = datetime.now()
-    return "Petty Cash " + BULAN[now.month-1] + " " + str(now.year)
+def get_sheet_name_besar(dt=None):
+    d = dt or datetime.now()
+    return "Rekap " + BULAN[d.month-1] + " " + str(d.year)
+
+def get_sheet_name_kecil(dt=None):
+    d = dt or datetime.now()
+    return "Petty Cash " + BULAN[d.month-1] + " " + str(d.year)
 
 def get_group_type(chat_title):
     t = (chat_title or "").lower()
@@ -42,28 +46,26 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return gspread.authorize(creds)
 
-def get_sheet(group):
+def get_sheet(group, dt=None):
     gc = get_gspread_client()
     if group == "kecil":
         sid = os.environ["SPREADSHEET_ID_KAS_KECIL"]
-        sname = get_sheet_name_kecil()
+        sname = get_sheet_name_kecil(dt)
     else:
         sid = os.environ["SPREADSHEET_ID_KAS_BESAR"]
-        sname = get_sheet_name_besar()
+        sname = get_sheet_name_besar(dt)
     sh = gc.open_by_key(sid)
     try:
         ws = sh.worksheet(sname)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=sname, rows=1000, cols=15)
         if group == "kecil":
-            # 12 kolom: A-L sesuai struktur sheet asli
             ws.append_row([
                 "Tanggal","Admin","Deskripsi","Kategori",
                 "Debet (Keluar)","Kredit (Masuk)","Saldo","Keterangan",
                 "Tanggal Invoice","Rekening Tujuan","Nama Penerima","Status"
             ])
         else:
-            # 11 kolom sesuai struktur sheet kas besar
             ws.append_row([
                 "Tanggal","Admin","Vendor","Nominal","Jenis",
                 "Kategori","Deskripsi","Tanggal Invoice",
@@ -114,14 +116,8 @@ def analyze_image(image_bytes):
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
-                },
-                {
-                    "type": "text",
-                    "text": 'Analisa struk ini. Kembalikan HANYA JSON (tidak ada teks lain):\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","deskripsi":"deskripsi singkat","kategori":"Konsumsi","jumlah":0,"metode":"Tunai","keterangan":""}\n\nKategori: Operational, Perlengkapan, Konsumsi, Transportasi, Lainnya\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat'
-                }
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "text", "text": 'Analisa struk ini. Kembalikan HANYA JSON (tidak ada teks lain):\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","deskripsi":"deskripsi singkat","kategori":"Konsumsi","jumlah":0,"metode":"Tunai","keterangan":""}\n\nKategori: Operational, Perlengkapan, Konsumsi, Transportasi, Lainnya\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat'}
             ]
         }]
     )
@@ -163,18 +159,10 @@ def get_saldo_kecil(ws):
 
 def append_kas_besar(ws, data, dicatat_oleh):
     tgl = datetime.now().strftime("%d/%m/%Y")
-    # 11 kolom: Tanggal, Admin, Vendor, Nominal, Jenis, Kategori, Deskripsi, Tgl Invoice, Rekening, Penerima, Status
     row = [
-        tgl,
-        dicatat_oleh,
-        data["vendor"],
-        data["jumlah"],
-        "Dana Keluar",
-        data["kategori"],
-        data["deskripsi"],
-        data["tanggal"],
-        "",
-        "",
+        tgl, dicatat_oleh, data["vendor"], data["jumlah"],
+        "Dana Keluar", data["kategori"], data["deskripsi"],
+        data["tanggal"], "", "",
         "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
     ]
     ws.append_row(row)
@@ -183,20 +171,12 @@ def append_kas_kecil(ws, data, dicatat_oleh):
     saldo = get_saldo_kecil(ws)
     saldo_baru = saldo - data["jumlah"]
     tgl = datetime.now().strftime("%d/%m/%Y")
-    # 12 kolom: Tanggal, Admin, Deskripsi, Kategori, Debet, Kredit, Saldo, Keterangan, Tgl Invoice, Rekening, Penerima, Status
     row = [
-        tgl,                                          # A: Tanggal
-        dicatat_oleh,                                 # B: Admin
-        data["deskripsi"],                            # C: Deskripsi
-        data["kategori"],                             # D: Kategori
-        data["jumlah"],                               # E: Debet (Keluar)
-        0,                                            # F: Kredit (Masuk)
-        saldo_baru,                                   # G: Saldo
-        data["keterangan"] or data["vendor"],         # H: Keterangan
-        data["tanggal"],                              # I: Tanggal Invoice
-        "",                                           # J: Rekening Tujuan
-        "",                                           # K: Nama Penerima
-        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")  # L: Status
+        tgl, dicatat_oleh, data["deskripsi"], data["kategori"],
+        data["jumlah"], 0, saldo_baru,
+        data["keterangan"] or data["vendor"],
+        data["tanggal"], "", "",
+        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
     ]
     ws.append_row(row)
 
@@ -276,19 +256,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group = get_group_type(chat.title or "")
     label = "Kas Besar" if group == "besar" else "Kas Kecil"
     dicatat_oleh = update.effective_user.first_name or "Bot"
+
     msg = await update.message.reply_text("Menganalisa struk, mohon tunggu...")
+
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await file.download_as_bytearray())
+
+        # Cek duplikat pakai hash foto
+        foto_hash = hashlib.md5(image_bytes).hexdigest()
+        if foto_hash in processed_hashes:
+            await msg.edit_text(
+                "Foto ini sudah pernah dicatat sebelumnya!\n"
+                "Kirim foto yang berbeda jika ingin mencatat transaksi baru."
+            )
+            return
+
         data = analyze_image(image_bytes)
-        ws = get_sheet(group)
+
+        # Tentukan sheet berdasarkan tanggal transaksi
+        try:
+            dt = datetime.strptime(data["tanggal"], "%Y-%m-%d")
+        except Exception:
+            dt = datetime.now()
+
+        ws = get_sheet(group, dt)
+
         if group == "besar":
             append_kas_besar(ws, data, dicatat_oleh)
         else:
             append_kas_kecil(ws, data, dicatat_oleh)
+
+        # Simpan hash setelah berhasil
+        processed_hashes.add(foto_hash)
+
+        sheet_name = get_sheet_name_besar(dt) if group == "besar" else get_sheet_name_kecil(dt)
+
         await msg.edit_text(
-            "Berhasil dicatat ke " + label + "!\n\n"
+            "Berhasil dicatat ke " + label + "!\n"
+            "Sheet: " + sheet_name + "\n\n"
             "Tanggal: " + data["tanggal"] + "\n"
             "Vendor: " + data["vendor"] + "\n"
             "Deskripsi: " + data["deskripsi"] + "\n"
@@ -296,9 +303,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Jumlah: Rp " + "{:,}".format(data["jumlah"]) + "\n"
             "Metode: " + data["metode"]
         )
+
+    except json.JSONDecodeError:
+        await msg.edit_text(
+            "Gagal membaca struk.\n\n"
+            "Kemungkinan penyebab:\n"
+            "- Foto terlalu gelap atau buram\n"
+            "- Struk tidak terbaca dengan jelas\n\n"
+            "Coba foto ulang dengan pencahayaan yang lebih baik."
+        )
+    except gspread.exceptions.APIError as e:
+        logger.error("Sheets API error: " + str(e))
+        await msg.edit_text(
+            "Gagal menyimpan ke Google Sheets.\n"
+            "Error: " + str(e) + "\n\n"
+            "Coba lagi beberapa saat."
+        )
     except Exception as e:
         logger.error("handle_photo error: " + str(e), exc_info=True)
-        await msg.edit_text("Terjadi error: " + str(e))
+        await msg.edit_text(
+            "Terjadi error saat memproses struk.\n"
+            "Error: " + str(e) + "\n\n"
+            "Hubungi admin jika masalah berlanjut."
+        )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
