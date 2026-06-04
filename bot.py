@@ -192,8 +192,8 @@ def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
         dicatat_oleh,           # B - Admin
         data["deskripsi"],      # C - Deskripsi
         data["kategori"],       # D - Kategori
-        debet,                  # E - Debet (tetap angka untuk kalkulasi saldo)
-        kredit,                 # F - Kredit (tetap angka untuk kalkulasi saldo)
+        fmt_rupiah(debet),      # E - Debet
+        fmt_rupiah(kredit),     # F - Kredit
         fmt_rupiah(saldo_baru), # G - Saldo
         data["vendor"],         # H - Keterangan/Vendor
         data["tanggal"],        # I - Tanggal Invoice
