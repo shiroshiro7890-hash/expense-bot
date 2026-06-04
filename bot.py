@@ -34,7 +34,7 @@ EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 
 # Admin yang boleh delete transaksi
-ADMIN_IDS = [5418153944, 5489011072]
+ADMIN_IDS = [5418153944]
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -210,18 +210,6 @@ def recalculate_saldo(ws):
         logger.info(f"[SALDO] Recalculate selesai, {len(updates)} baris diupdate")
     except Exception as e:
         logger.error(f"[SALDO] Recalculate gagal: {e}", exc_info=True)
-    rows = ws.get_all_values()
-    saldo = 0
-    for row in rows[1:]:
-        if not row or not row[0]:
-            continue
-        try:
-            debet  = float(re.sub(r'[^0-9]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
-            kredit = float(re.sub(r'[^0-9]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
-            saldo  = saldo + kredit - debet
-        except Exception:
-            continue
-    return saldo
 
 def append_kas_kecil(ws, data, dicatat_oleh, foto_link=""):
     saldo = get_saldo_kecil(ws)
@@ -313,42 +301,55 @@ def format_tanggal_display(tanggal_str):
         return tanggal_str
 
 def analyze_image(image_bytes):
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    resp = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=300,
-        system='Kamu adalah asisten keuangan. Ekstrak data struk. Kembalikan HANYA JSON valid.',
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                {"type": "text", "text": (
-                    'Analisa struk ini. Kembalikan HANYA JSON:\n'
-                    '{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\n'
-                    'ATURAN TANGGAL:\n'
-                    '- Format output WAJIB YYYY-MM-DD\n'
-                    '- Struk tulis 01-06-2026 atau 01/06/2026 = output 2026-06-01\n'
-                    '- Tahun HARUS 4 digit penuh\n\n'
-                    'Metode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\n'
-                    'Jumlah = angka bulat tanpa titik/koma\n'
-                    'Hanya JSON, tidak ada teks lain'
-                )}
-            ]
-        }]
-    )
-    raw = resp.content[0].text
-    logger.info(f"[CLAUDE] Response: {raw}")
-    data = parse_json_safe(raw)
-    tanggal = parse_tanggal(data.get("tanggal"))
-    jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
-    jumlah = int(jumlah_raw) if jumlah_raw else 0
-    return {
-        "tanggal": tanggal,
-        "vendor": str(data.get("vendor") or "-").strip(),
-        "jumlah": jumlah,
-        "metode": str(data.get("metode") or "Lainnya").strip(),
-    }
+    try:
+        client = anthropic.Anthropic(
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            timeout=30.0  # timeout 30 detik
+        )
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            system='Kamu adalah asisten keuangan. Ekstrak data struk. Kembalikan HANYA JSON valid.',
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": (
+                        'Analisa struk ini. Kembalikan HANYA JSON:\n'
+                        '{"tanggal":"YYYY-MM-DD","vendor":"nama toko","jumlah":0,"metode":"Tunai"}\n\n'
+                        'ATURAN TANGGAL:\n'
+                        '- Format output WAJIB YYYY-MM-DD\n'
+                        '- Struk tulis 01-06-2026 atau 01/06/2026 = output 2026-06-01\n'
+                        '- Tahun HARUS 4 digit penuh\n\n'
+                        'Metode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\n'
+                        'Jumlah = angka bulat tanpa titik/koma\n'
+                        'Hanya JSON, tidak ada teks lain'
+                    )}
+                ]
+            }]
+        )
+        raw = resp.content[0].text
+        logger.info(f"[CLAUDE] Response: {raw}")
+        data = parse_json_safe(raw)
+        tanggal = parse_tanggal(data.get("tanggal"))
+        jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
+        jumlah = int(jumlah_raw) if jumlah_raw else 0
+        return {
+            "tanggal": tanggal,
+            "vendor": str(data.get("vendor") or "-").strip(),
+            "jumlah": jumlah,
+            "metode": str(data.get("metode") or "Lainnya").strip(),
+        }
+    except anthropic.APITimeoutError:
+        logger.error("[CLAUDE] Timeout — API tidak respon dalam 30 detik")
+        raise Exception("Claude AI timeout. Coba kirim foto ulang.")
+    except anthropic.APIStatusError as e:
+        logger.error(f"[CLAUDE] API error: {e.status_code} — {e.message}")
+        raise Exception(f"Claude AI error ({e.status_code}). Coba lagi.")
+    except Exception as e:
+        logger.error(f"[CLAUDE] Error tidak terduga: {e}", exc_info=True)
+        raise
 
 # ─────────────────────────────────────────
 # Keyboard Helpers
@@ -461,18 +462,30 @@ async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data_rows:
             await update.message.reply_text("Belum ada data transaksi.")
             return
-        last5 = data_rows[-5:]
-        text = f"5 Transaksi Terakhir - {label}\n\n"
-        for row in reversed(last5):
+
+        # Ambil 10 transaksi terbaru saja (hindari pesan terlalu panjang)
+        last10 = data_rows[-10:]
+        total_semua = len(data_rows)
+        text = f"📋 10 Transaksi Terbaru — {label}\n"
+        text += f"(Total bulan ini: {total_semua} transaksi)\n\n"
+
+        for row in reversed(last10):
             try:
                 if group == "besar":
-                    nominal = int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
-                    text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  {fmt_rupiah(nominal)}\n\n"
+                    nominal = int(float(re.sub(r'[^0-9]', '', str(row[4] or 0))))
+                    deskripsi = (row[2] or '-')[:25]
+                    text += f"• {row[0]} | {row[3]}\n  {deskripsi}\n  {fmt_rupiah(nominal)}\n\n"
                 else:
-                    debet = int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
-                    text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  {fmt_rupiah(debet)}\n\n"
+                    debet = int(float(re.sub(r'[^0-9]', '', str(row[4] or 0))))
+                    deskripsi = (row[2] or '-')[:25]
+                    text += f"• {row[0]} | {row[3]}\n  {deskripsi}\n  {fmt_rupiah(debet)}\n\n"
             except Exception:
-                text += f"- {row[0]}\n\n"
+                text += f"• {row[0]}\n\n"
+
+        # Potong jika melebihi limit Telegram 4096 karakter
+        if len(text) > 3800:
+            text = text[:3800] + "\n\n... (terpotong, lihat dashboard kasbot.id)"
+
         await update.message.reply_text(text)
     except Exception as e:
         await update.message.reply_text(f"Gagal mengambil data: {e}")
