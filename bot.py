@@ -441,8 +441,8 @@ async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for row in reversed(last5):
             try:
                 if group == "besar":
-                    nominal = int(float(re.sub(r'[^0-9.]', '', str(row[3] or 0))))
-                    text += f"- {row[0]} | {row[5]}\n  {row[6]}\n  {fmt_rupiah(nominal)}\n\n"
+                    nominal = int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
+                    text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  {fmt_rupiah(nominal)}\n\n"
                 else:
                     debet = int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
                     text += f"- {row[0]} | {row[3]}\n  {row[2]}\n  {fmt_rupiah(debet)}\n\n"
@@ -465,7 +465,7 @@ async def cmd_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for row in data_rows:
             try:
                 if group == "besar":
-                    total += int(float(re.sub(r'[^0-9.]', '', str(row[3] or 0))))
+                    total += int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
                 else:
                     total += int(float(re.sub(r'[^0-9.]', '', str(row[4] or 0))))
                 count += 1
