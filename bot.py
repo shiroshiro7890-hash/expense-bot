@@ -419,7 +419,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Halo! Saya bot pencatat {label}\n"
         f"Sheet aktif: {sheet_name}\n\n"
         f"Perintah:\n"
-        f"/cek - 5 transaksi terakhir\n"
+        f"/cek - Semua transaksi bulan ini\n"
         f"/total - Total bulan ini\n"
         f"/edit - Edit transaksi\n"
         f"/batal - Batalkan proses"
@@ -853,6 +853,8 @@ async def handle_edit_pilih_transaksi(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("📂 Kategori", callback_data="editfield_kategori")],
         [InlineKeyboardButton("💰 Nominal", callback_data="editfield_nominal")],
         [InlineKeyboardButton("📅 Tanggal", callback_data="editfield_tanggal")],
+        [InlineKeyboardButton("🏦 Rekening", callback_data="editfield_rekening")],
+        [InlineKeyboardButton("👤 Penerima", callback_data="editfield_penerima")],
         [InlineKeyboardButton("❌ Batalkan", callback_data="editfield_batal")],
     ])
 
@@ -893,6 +895,8 @@ async def handle_edit_pilih_field(update: Update, context: ContextTypes.DEFAULT_
         "deskripsi": "✏️ Ketik deskripsi baru:\nContoh: bayar gaji bulan Juni",
         "nominal": "💰 Ketik nominal baru (angka saja):\nContoh: 150000",
         "tanggal": "📅 Ketik tanggal baru:\nFormat: DD/MM/YYYY\nContoh: 04/06/2026",
+        "rekening": "🏦 Ketik nomor rekening baru:\nContoh: 1234567890\n(Ketik '-' jika tunai)",
+        "penerima": "👤 Ketik nama penerima baru:\nContoh: PT Sumber Makmur\n(Ketik '-' jika tidak ada)",
     }
     await query.edit_message_text(prompts.get(field, "Ketik nilai baru:"))
     return EDIT_INPUT_NILAI
@@ -942,10 +946,10 @@ async def handle_edit_input_nilai(update: Update, context: ContextTypes.DEFAULT_
         edit_label = f"EDITED - {datetime.now().strftime('%d/%m/%Y, %H.%M.%S')} by {editor}"
 
         if group == "besar":
-            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9}
+            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9, "rekening": 10, "penerima": 11}
             status_col = 12
         else:
-            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9}
+            field_col_map = {"deskripsi": 3, "kategori": 4, "nominal": 5, "tanggal": 9, "rekening": 10, "penerima": 11}
             status_col = 12
 
         col_idx = field_col_map.get(field)
