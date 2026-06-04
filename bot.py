@@ -56,9 +56,19 @@ def get_sheet(group):
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=sname, rows=1000, cols=15)
         if group == "kecil":
-            ws.append_row(["Tanggal","Admin","Deskripsi","Kategori","Debet (Keluar)","Kredit (Masuk)","Saldo","Keterangan","","","","Status"])
+            # 12 kolom: A-L sesuai struktur sheet asli
+            ws.append_row([
+                "Tanggal","Admin","Deskripsi","Kategori",
+                "Debet (Keluar)","Kredit (Masuk)","Saldo","Keterangan",
+                "Tanggal Invoice","Rekening Tujuan","Nama Penerima","Status"
+            ])
         else:
-            ws.append_row(["Tanggal","Admin","Vendor","Nominal","Jenis","Kategori","Deskripsi","Tanggal Invoice","Rekening","Penerima","Status"])
+            # 11 kolom sesuai struktur sheet kas besar
+            ws.append_row([
+                "Tanggal","Admin","Vendor","Nominal","Jenis",
+                "Kategori","Deskripsi","Tanggal Invoice",
+                "Rekening","Penerima","Status"
+            ])
         ws.format("A1:L1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
@@ -66,27 +76,18 @@ def get_sheet(group):
     return ws
 
 def parse_json_safe(raw_text):
-    """Parse JSON dari response Claude dengan berbagai fallback"""
     text = raw_text.strip()
-    
-    # Bersihkan markdown
     text = text.replace("```json", "").replace("```", "").strip()
-    
-    # Coba parse langsung
     try:
         return json.loads(text)
     except Exception:
         pass
-    
-    # Cari { ... } 
     match = re.search(r'\{[\s\S]*\}', text)
     if match:
         try:
             return json.loads(match.group())
         except Exception:
             pass
-    
-    # Bangun dari key: value manual
     result = {}
     patterns = {
         "tanggal": r'tanggal["\s:]+([0-9]{4}-[0-9]{2}-[0-9]{2})',
@@ -100,7 +101,6 @@ def parse_json_safe(raw_text):
     for key, pattern in patterns.items():
         m = re.search(pattern, text, re.IGNORECASE)
         result[key] = m.group(1).strip().strip('"').strip("'") if m else ""
-    
     return result
 
 def analyze_image(image_bytes):
@@ -110,7 +110,7 @@ def analyze_image(image_bytes):
     resp = client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=500,
-        system="Kamu adalah asisten keuangan. Ekstrak data dari struk belanja. WAJIB kembalikan HANYA JSON valid. Contoh output yang benar: {\"tanggal\":\"2026-06-04\",\"vendor\":\"Alfamart\",\"deskripsi\":\"Belanja harian\",\"kategori\":\"Konsumsi\",\"jumlah\":62500,\"metode\":\"QRIS\",\"keterangan\":\"\"}",
+        system='Kamu adalah asisten keuangan. Ekstrak data struk. Kembalikan HANYA JSON valid. Contoh: {"tanggal":"2026-06-04","vendor":"Alfamart","deskripsi":"Belanja harian","kategori":"Konsumsi","jumlah":62500,"metode":"QRIS","keterangan":""}',
         messages=[{
             "role": "user",
             "content": [
@@ -120,7 +120,7 @@ def analyze_image(image_bytes):
                 },
                 {
                     "type": "text",
-                    "text": "Analisa struk ini. Kembalikan HANYA JSON ini (tidak ada teks lain sama sekali):\n{\"tanggal\":\"YYYY-MM-DD\",\"vendor\":\"nama toko\",\"deskripsi\":\"deskripsi singkat\",\"kategori\":\"Konsumsi\",\"jumlah\":0,\"metode\":\"Tunai\",\"keterangan\":\"\"}\n\nKategori: Operational, Perlengkapan, Konsumsi, Transportasi, Lainnya\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat tanpa titik/koma"
+                    "text": 'Analisa struk ini. Kembalikan HANYA JSON (tidak ada teks lain):\n{"tanggal":"YYYY-MM-DD","vendor":"nama toko","deskripsi":"deskripsi singkat","kategori":"Konsumsi","jumlah":0,"metode":"Tunai","keterangan":""}\n\nKategori: Operational, Perlengkapan, Konsumsi, Transportasi, Lainnya\nMetode: Tunai, Transfer Bank, QRIS, E-Wallet, Kartu Debit, Kartu Kredit, Lainnya\nJumlah = angka bulat'
                 }
             ]
         }]
@@ -128,17 +128,14 @@ def analyze_image(image_bytes):
 
     raw = resp.content[0].text
     logger.info("Claude response: " + raw)
-    
     data = parse_json_safe(raw)
 
-    # Validasi dan normalisasi
     tanggal = str(data.get("tanggal") or "").strip()
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', tanggal):
         tanggal = datetime.now().strftime("%Y-%m-%d")
 
-    jumlah_raw = str(data.get("jumlah") or "0")
-    jumlah_clean = re.sub(r'[^0-9]', '', jumlah_raw)
-    jumlah = int(jumlah_clean) if jumlah_clean else 0
+    jumlah_raw = re.sub(r'[^0-9]', '', str(data.get("jumlah") or "0"))
+    jumlah = int(jumlah_raw) if jumlah_raw else 0
 
     return {
         "tanggal": tanggal,
@@ -150,8 +147,23 @@ def analyze_image(image_bytes):
         "keterangan": str(data.get("keterangan") or "").strip(),
     }
 
+def get_saldo_kecil(ws):
+    rows = ws.get_all_values()
+    saldo = 0
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        try:
+            debet = float(re.sub(r'[^0-9.]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
+            kredit = float(re.sub(r'[^0-9.]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
+            saldo = saldo + kredit - debet
+        except Exception:
+            continue
+    return saldo
+
 def append_kas_besar(ws, data, dicatat_oleh):
     tgl = datetime.now().strftime("%d/%m/%Y")
+    # 11 kolom: Tanggal, Admin, Vendor, Nominal, Jenis, Kategori, Deskripsi, Tgl Invoice, Rekening, Penerima, Status
     row = [
         tgl,
         dicatat_oleh,
@@ -168,32 +180,23 @@ def append_kas_besar(ws, data, dicatat_oleh):
     ws.append_row(row)
 
 def append_kas_kecil(ws, data, dicatat_oleh):
-    # Hitung saldo terakhir
-    rows = ws.get_all_values()
-    saldo = 0
-    for row in rows[1:]:
-        if not row or not row[0]:
-            continue
-        try:
-            debet = float(re.sub(r'[^0-9.]', '', str(row[4]))) if len(row) > 4 and row[4] else 0
-            kredit = float(re.sub(r'[^0-9.]', '', str(row[5]))) if len(row) > 5 and row[5] else 0
-            saldo = saldo + kredit - debet
-        except Exception:
-            continue
-
+    saldo = get_saldo_kecil(ws)
     saldo_baru = saldo - data["jumlah"]
     tgl = datetime.now().strftime("%d/%m/%Y")
+    # 12 kolom: Tanggal, Admin, Deskripsi, Kategori, Debet, Kredit, Saldo, Keterangan, Tgl Invoice, Rekening, Penerima, Status
     row = [
-        tgl,
-        dicatat_oleh,
-        data["deskripsi"],
-        data["kategori"],
-        data["jumlah"],
-        0,
-        saldo_baru,
-        data["keterangan"] or data["vendor"],
-        "", "", "",
-        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")
+        tgl,                                          # A: Tanggal
+        dicatat_oleh,                                 # B: Admin
+        data["deskripsi"],                            # C: Deskripsi
+        data["kategori"],                             # D: Kategori
+        data["jumlah"],                               # E: Debet (Keluar)
+        0,                                            # F: Kredit (Masuk)
+        saldo_baru,                                   # G: Saldo
+        data["keterangan"] or data["vendor"],         # H: Keterangan
+        data["tanggal"],                              # I: Tanggal Invoice
+        "",                                           # J: Rekening Tujuan
+        "",                                           # K: Nama Penerima
+        "Bot - " + datetime.now().strftime("%d/%m/%Y %H:%M")  # L: Status
     ]
     ws.append_row(row)
 
@@ -273,22 +276,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group = get_group_type(chat.title or "")
     label = "Kas Besar" if group == "besar" else "Kas Kecil"
     dicatat_oleh = update.effective_user.first_name or "Bot"
-
     msg = await update.message.reply_text("Menganalisa struk, mohon tunggu...")
-
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await file.download_as_bytearray())
-
         data = analyze_image(image_bytes)
-
         ws = get_sheet(group)
         if group == "besar":
             append_kas_besar(ws, data, dicatat_oleh)
         else:
             append_kas_kecil(ws, data, dicatat_oleh)
-
         await msg.edit_text(
             "Berhasil dicatat ke " + label + "!\n\n"
             "Tanggal: " + data["tanggal"] + "\n"
@@ -298,7 +296,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Jumlah: Rp " + "{:,}".format(data["jumlah"]) + "\n"
             "Metode: " + data["metode"]
         )
-
     except Exception as e:
         logger.error("handle_photo error: " + str(e), exc_info=True)
         await msg.edit_text("Terjadi error: " + str(e))
