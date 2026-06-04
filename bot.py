@@ -92,7 +92,7 @@ def upload_foto_to_drive(image_bytes, filename):
             result = json.loads(resp.read().decode("utf-8"))
 
         if result.get("success"):
-            link = result["data"]["url_viewer"]
+            link = result["data"]["url"]  # direct image link
             logger.info(f"[IMGBB] Upload berhasil: {link}")
             return link
         else:
