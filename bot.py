@@ -35,7 +35,7 @@ DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 RESET_KONFIRMASI = 13
 
 # POS States
-POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI, POS_INPUT_CAPSTER = range(14, 19)
+POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI, POS_INPUT_CAPSTER, POS_INPUT_NAMA_CUSTOMER, POS_INPUT_HP_CUSTOMER = range(14, 21)
 POS_SETUP_NAMA, POS_SETUP_HARGA, POS_SETUP_KONFIRMASI = range(18, 21)
 POS_EDIT_PILIH, POS_EDIT_FIELD, POS_EDIT_NILAI = range(21, 24)
 POS_HAPUS_PILIH, POS_HAPUS_KONFIRMASI = range(24, 26)
@@ -1450,10 +1450,11 @@ def get_pos_sheet(dt=None):
         ws = sh.add_worksheet(title=sname, rows=2000, cols=12)
         ws.append_row([
             "No Nota", "Waktu", "Outlet", "Kasir",
-            "Capster", "Produk", "Qty", "Harga Satuan", "Total",
+            "Capster", "Nama Customer", "No HP Customer",
+            "Produk", "Qty", "Harga Satuan", "Total",
             "Metode Bayar", "Tunai", "Kembalian", "Status"
         ])
-        ws.format("A1:M1", {
+        ws.format("A1:O1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
         })
@@ -1521,7 +1522,7 @@ def get_omzet_hari_ini(outlet=None):
             if outlet and len(row) > 2 and outlet.lower() not in row[2].lower():
                 continue
             try:
-                total += int(re.sub(r"[^0-9]", "", str(row[8]))) if len(row) > 8 and row[8] else 0
+                total += int(re.sub(r"[^0-9]", "", str(row[10]))) if len(row) > 10 and row[10] else 0
                 count += 1
             except Exception:
                 continue
@@ -1856,10 +1857,51 @@ async def handle_pos_input_capster(update: Update, context: ContextTypes.DEFAULT
         return POS_INPUT_CAPSTER
 
     user_data_temp[user_id]["capster"] = capster
+
+    await update.message.reply_text(
+        f"✂️ Capster: {capster}\n\n"
+        f"👤 Ketik nama customer:\n"
+        f"Contoh: Budi Santoso\n"
+        f"(Ketik '-' jika tidak mau isi)"
+    )
+    return POS_INPUT_NAMA_CUSTOMER
+
+
+async def handle_pos_input_nama_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nama_customer = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    user_data_temp[user_id]["nama_customer"] = nama_customer
+
+    await update.message.reply_text(
+        f"👤 Customer: {nama_customer}\n\n"
+        f"📱 Ketik nomor HP customer:\n"
+        f"Contoh: 08123456789\n"
+        f"(Ketik '-' jika tidak mau isi)"
+    )
+    return POS_INPUT_HP_CUSTOMER
+
+async def handle_pos_input_hp_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    hp_customer = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    user_data_temp[user_id]["hp_customer"] = hp_customer
     grand_total = user_data_temp[user_id]["grand_total"]
+    nama_customer = user_data_temp[user_id].get("nama_customer", "-")
+    capster = user_data_temp[user_id].get("capster", "-")
 
     await update.message.reply_text(
         f"✂️ Capster: {capster}\n"
+        f"👤 Customer: {nama_customer}\n"
+        f"📱 HP: {hp_customer}\n"
         f"💰 Total: {fmt_rupiah(grand_total)}\n\n"
         f"Pilih metode pembayaran:",
         reply_markup=build_bayar_keyboard()
@@ -1948,6 +1990,8 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
     try:
         ws = get_pos_sheet()
         capster = temp.get("capster", "-")
+        nama_customer = temp.get("nama_customer", "-")
+        hp_customer = temp.get("hp_customer", "-")
         for item in keranjang:
             ws.append_row([
                 no_nota,
@@ -1955,6 +1999,8 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
                 outlet,
                 kasir,
                 capster,
+                nama_customer,
+                hp_customer,
                 item["nama"],
                 item["qty"],
                 fmt_rupiah(item["harga"]),
@@ -1975,6 +2021,10 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
         struk += f"Tgl : {waktu}\n"
         struk += f"Kasir: {kasir}\n"
         struk += f"Capster: {capster}\n"
+        if nama_customer != "-":
+            struk += f"Customer: {nama_customer}\n"
+        if hp_customer != "-":
+            struk += f"HP: {hp_customer}\n"
         struk += f"{'-'*28}\n"
         for item in keranjang:
             struk += f"{item['nama']}\n"
@@ -2042,14 +2092,14 @@ async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(row) < 8:
                 continue
             try:
-                nominal = int(re.sub(r"[^0-9]", "", str(row[8]))) if len(row) > 8 and row[8] else 0
+                nominal = int(re.sub(r"[^0-9]", "", str(row[10]))) if len(row) > 10 and row[10] else 0
                 total_bulan += nominal
                 count_bulan += 1
 
-                metode = row[9] if len(row) > 9 else "Lainnya"
+                metode = row[11] if len(row) > 11 else "Lainnya"
                 by_metode[metode] = by_metode.get(metode, 0) + nominal
 
-                produk = row[5] if len(row) > 5 else "Lainnya"
+                produk = row[7] if len(row) > 7 else "Lainnya"
                 by_produk[produk] = by_produk.get(produk, 0) + nominal
 
                 capster_name = row[4] if len(row) > 4 else "-"
@@ -2150,6 +2200,8 @@ def main():
             ],
             POS_INPUT_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_qty)],
             POS_INPUT_CAPSTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_capster)],
+            POS_INPUT_NAMA_CUSTOMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_nama_customer)],
+            POS_INPUT_HP_CUSTOMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_hp_customer)],
             POS_PILIH_BAYAR: [CallbackQueryHandler(handle_pos_pilih_bayar, pattern="^pos_bayar_|^pos_batal$")],
             POS_INPUT_TUNAI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_tunai)],
         },
