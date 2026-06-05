@@ -1786,147 +1786,96 @@ def generate_struk_image(outlet, no_nota, waktu, kasir, capster, nama_customer,
 
 def generate_struk_pdf(outlet, no_nota, waktu, kasir, capster, nama_customer,
                        hp_customer, keranjang, grand_total, tunai, kembalian, metode):
-    """Generate struk sebagai PDF siap print, return BytesIO."""
+    """Generate struk PDF siap print thermal, return BytesIO."""
     try:
         from fpdf import FPDF
 
-        # Ukuran 80mm thermal printer = 80mm wide
-        # 1 mm = 2.8346 pt, tapi fpdf pakai mm
-        W = 80  # mm
-
-        pdf = FPDF(orientation='P', unit='mm', format=(W, 200))
+        W = 80  # mm lebar kertas thermal
+        pdf = FPDF(orientation='P', unit='mm', format=(W, 250))
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=3)
-        pdf.set_margins(4, 3, 4)
+        pdf.set_margins(3, 3, 3)
 
-        # ── HEADER ──
-        pdf.set_fill_color(26, 26, 26)
-        pdf.rect(0, 0, W, 28, 'F')
+        def center(text, y, size=8, bold=False):
+            pdf.set_font('Helvetica', 'B' if bold else '', size)
+            pdf.set_xy(0, y)
+            pdf.cell(W, 5, str(text), align='C')
 
-        pdf.set_text_color(136, 136, 136)
-        pdf.set_font('Helvetica', '', 7)
-        pdf.set_xy(0, 4)
-        pdf.cell(W, 4, 'BARBERSHOP', align='C')
+        def separator(y, char='='):
+            pdf.set_font('Courier', '', 7)
+            pdf.set_xy(3, y)
+            pdf.cell(W - 6, 4, char * 38)
 
-        brand = outlet.upper().replace(' BARBERSHOP POS', '').replace(' POS', '').strip()
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.set_xy(0, 9)
-        pdf.cell(W, 7, brand, align='C')
+        def row_lr(label, value, y, size=7.5, bold_val=False):
+            pdf.set_font('Helvetica', '', size)
+            pdf.set_xy(3, y)
+            pdf.cell(28, 5, str(label))
+            pdf.set_font('Helvetica', 'B' if bold_val else '', size)
+            pdf.set_xy(3, y)
+            pdf.cell(W - 6, 5, str(value), align='R')
 
-        pdf.set_text_color(100, 100, 100)
-        pdf.set_font('Helvetica', '', 6)
-        pdf.set_xy(0, 19)
-        pdf.cell(W, 4, no_nota, align='C')
-        pdf.set_xy(0, 23)
-        pdf.cell(W, 4, waktu, align='C')
+        y = 4
 
-        pdf.set_text_color(0, 0, 0)
-        y = 32
+        # HEADER
+        separator(y, '='); y += 5
+        brand = outlet.upper().replace(' BARBERSHOP POS','').replace(' POS','').strip()
+        center(brand, y, size=16, bold=True); y += 8
+        center('BARBERSHOP', y, size=7); y += 5
+        separator(y, '='); y += 5
 
-        # ── INFO ──
-        pdf.set_font('Helvetica', '', 7.5)
-        def row(label, value, yy):
-            pdf.set_xy(4, yy)
-            pdf.set_text_color(100, 100, 100)
-            pdf.cell(20, 5, label)
-            pdf.set_text_color(26, 26, 26)
-            pdf.set_font('Helvetica', 'B', 7.5)
-            pdf.set_xy(24, yy)
-            pdf.cell(W - 28, 5, str(value), align='R')
-            pdf.set_font('Helvetica', '', 7.5)
-            return yy + 5
+        # INFO
+        center(no_nota, y, size=7); y += 5
+        center(waktu, y, size=7); y += 5
+        separator(y, '-'); y += 4
 
-        y = row('Kasir', kasir, y)
-        y = row('Capster', capster, y)
+        row_lr('Kasir', kasir, y); y += 5
+        row_lr('Capster', capster, y); y += 5
         if nama_customer and nama_customer != '-':
-            y = row('Customer', nama_customer, y)
+            row_lr('Customer', nama_customer, y); y += 5
         if hp_customer and hp_customer != '-':
-            y = row('HP', hp_customer, y)
-        y = row('Waktu', waktu, y)
+            row_lr('HP', hp_customer, y); y += 5
 
-        # Garis
-        y += 1
-        pdf.set_draw_color(200, 200, 200)
-        pdf.line(4, y, W - 4, y)
-        y += 3
+        separator(y, '-'); y += 4
 
-        # ── ITEMS ──
+        # ITEMS
         for item in keranjang:
-            pdf.set_xy(4, y)
-            pdf.set_text_color(26, 26, 26)
-            pdf.set_font('Helvetica', 'B', 8)
-            pdf.cell(W - 8, 5, item['nama'])
+            pdf.set_font('Helvetica', 'B', 8.5)
+            pdf.set_xy(3, y)
+            pdf.cell(W - 6, 5, item['nama'])
             y += 5
-            pdf.set_xy(4, y)
-            pdf.set_font('Helvetica', '', 7)
-            pdf.set_text_color(100, 100, 100)
-            pdf.cell(30, 4, f"{item['qty']} x {fmt_rupiah(item['harga'])}")
-            pdf.set_xy(4, y)
-            pdf.set_text_color(26, 26, 26)
-            pdf.set_font('Helvetica', '', 7)
-            pdf.cell(W - 8, 4, fmt_rupiah(item['subtotal']), align='R')
-            y += 5
-
-        # Garis
-        y += 1
-        pdf.line(4, y, W - 4, y)
-        y += 3
-
-        # ── TUNAI & KEMBALI ──
-        if tunai > 0:
             pdf.set_font('Helvetica', '', 7.5)
-            pdf.set_text_color(100, 100, 100)
-            pdf.set_xy(4, y)
-            pdf.cell(30, 5, 'Tunai')
-            pdf.set_xy(4, y)
-            pdf.cell(W - 8, 5, fmt_rupiah(tunai), align='R')
-            y += 5
-            pdf.set_xy(4, y)
-            pdf.cell(30, 5, 'Kembali')
-            pdf.set_xy(4, y)
-            pdf.cell(W - 8, 5, fmt_rupiah(kembalian), align='R')
+            pdf.set_xy(3, y)
+            pdf.cell(30, 5, f"  {item['qty']} x {fmt_rupiah(item['harga'])}")
+            pdf.set_font('Helvetica', 'B', 7.5)
+            pdf.set_xy(3, y)
+            pdf.cell(W - 6, 5, fmt_rupiah(item['subtotal']), align='R')
             y += 5
 
-        # ── TOTAL ──
-        pdf.set_font('Helvetica', '', 7.5)
-        pdf.set_text_color(100, 100, 100)
-        pdf.set_xy(4, y)
-        pdf.cell(20, 7, 'TOTAL')
-        pdf.set_font('Helvetica', 'B', 12)
-        pdf.set_text_color(26, 26, 26)
-        pdf.set_xy(4, y)
-        pdf.cell(W - 8, 7, fmt_rupiah(grand_total), align='R')
-        y += 9
+        separator(y, '-'); y += 4
 
-        # ── METODE ──
-        pdf.set_draw_color(200, 200, 200)
-        pdf.line(4, y, W - 4, y)
-        y += 3
-        pdf.set_font('Helvetica', '', 7)
-        pdf.set_text_color(100, 100, 100)
-        pdf.set_xy(4, y)
-        pdf.cell(25, 5, 'Metode bayar')
-        pdf.set_xy(4, y)
-        pdf.set_text_color(26, 26, 26)
-        pdf.cell(W - 8, 5, metode, align='R')
-        y += 7
+        # TUNAI & KEMBALI
+        if tunai > 0:
+            row_lr('Tunai', fmt_rupiah(tunai), y); y += 5
+            row_lr('Kembali', fmt_rupiah(kembalian), y); y += 5
 
-        # ── FOOTER ──
-        pdf.line(4, y, W - 4, y)
-        y += 3
-        pdf.set_font('Helvetica', 'B', 8)
-        pdf.set_text_color(26, 26, 26)
-        pdf.set_xy(0, y)
-        pdf.cell(W, 5, 'Terima kasih!', align='C')
-        y += 5
-        pdf.set_font('Helvetica', '', 6.5)
-        pdf.set_text_color(100, 100, 100)
-        pdf.set_xy(0, y)
-        pdf.cell(W, 4, 'kasbot.id', align='C')
+        # TOTAL
+        separator(y, '-'); y += 3
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.set_xy(3, y)
+        pdf.cell(28, 7, 'TOTAL')
+        pdf.set_xy(3, y)
+        pdf.cell(W - 6, 7, fmt_rupiah(grand_total), align='R')
+        y += 8
 
-        # Trim halaman ke konten
-        pdf.page_break_trigger = y + 10
+        # METODE
+        separator(y, '-'); y += 4
+        row_lr('Metode Bayar', metode, y); y += 6
+
+        # FOOTER
+        separator(y, '='); y += 5
+        center('Terima kasih!', y, size=9, bold=True); y += 6
+        center('kasbot.id', y, size=7); y += 5
+        separator(y, '=')
 
         buf = io.BytesIO(pdf.output())
         buf.seek(0)
