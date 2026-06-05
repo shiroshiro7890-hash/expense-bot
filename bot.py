@@ -1294,6 +1294,7 @@ async def cmd_pos_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏪 KasBot POS — {chat.title}\nMenu: {len(produk)} produk\n\n"
         f"/jual - Input transaksi\n/omzet - Omzet hari ini\n"
         f"/laporan - Rekap bulanan\n/produk - Daftar produk\n"
+        f"/cari_customer - Cari history customer\n"
         f"/tambah_produk - Tambah produk (admin)\n/batal - Batalkan"
     )
 
@@ -1790,6 +1791,87 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
             await reply_target.reply_text(f"❌ Gagal: {e}")
     return ConversationHandler.END
 
+async def cmd_cari_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cari history transaksi customer by nama atau HP"""
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "🔍 Cara pakai:\n"
+            "/cari_customer <nama atau nomor HP>\n\n"
+            "Contoh:\n"
+            "/cari_customer Budi\n"
+            "/cari_customer 08123456789"
+        )
+        return
+
+    q = " ".join(args).strip()
+    msg = await update.message.reply_text(f"🔍 Mencari customer: {q}...")
+
+    try:
+        import urllib.parse
+        url = f"{os.environ.get('BACKEND_URL', 'https://kasbot-backend-production.up.railway.app')}/api/penjualan/customer?q={urllib.parse.quote(q)}"
+
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+
+        if not result.get("success"):
+            await msg.edit_text(f"❌ Error: {result.get('error', 'Unknown')}")
+            return
+
+        data = result.get("data", [])
+        total = result.get("total", 0)
+
+        if not data:
+            await msg.edit_text(f"❌ Customer '{q}' tidak ditemukan.")
+            return
+
+        # Rekap per no_nota (grupkan item dalam 1 transaksi)
+        transaksi = {}
+        for r in data:
+            nota = r["no_nota"]
+            if nota not in transaksi:
+                transaksi[nota] = {
+                    "no_nota": nota,
+                    "waktu": r["waktu"],
+                    "nama": r["nama_customer"],
+                    "hp": r["hp_customer"],
+                    "capster": r["capster"],
+                    "items": [],
+                    "total": 0,
+                    "metode": r["metode_bayar"],
+                }
+            transaksi[nota]["items"].append(f"{r['produk']} x{r['qty']}")
+            transaksi[nota]["total"] += r["total"]
+
+        trx_list = list(transaksi.values())
+        grand_total = sum(t["total"] for t in trx_list)
+
+        # Ambil nama & HP customer dari data pertama
+        nama_c = trx_list[0]["nama"] if trx_list else q
+        hp_c   = trx_list[0]["hp"] if trx_list else "-"
+
+        text = f"👤 *{nama_c}*\n"
+        text += f"📱 {hp_c}\n"
+        text += f"🧾 {len(trx_list)} transaksi | {fmt_rupiah(grand_total)}\n"
+        text += f"{'─'*28}\n\n"
+
+        # Tampilkan max 10 transaksi terbaru
+        for t in trx_list[-10:]:
+            text += f"📅 {t['waktu']}\n"
+            text += f"✂️ {t['capster']} | {', '.join(t['items'])}\n"
+            text += f"💰 {fmt_rupiah(t['total'])} — {t['metode']}\n\n"
+
+        if len(trx_list) > 10:
+            text += f"_...dan {len(trx_list)-10} transaksi lainnya_\n"
+
+        await msg.edit_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"[CARI_CUSTOMER] Error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Gagal mencari: {e}")
+
+
 async def cmd_omzet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     total, count = get_omzet_hari_ini(chat.title)
@@ -1934,6 +2016,7 @@ def main():
     app.add_handler(CommandHandler("produk", cmd_produk))
     app.add_handler(CommandHandler("omzet", cmd_omzet))
     app.add_handler(CommandHandler("laporan", cmd_laporan))
+    app.add_handler(CommandHandler("cari_customer", cmd_cari_customer))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started!")
