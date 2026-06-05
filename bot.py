@@ -1229,14 +1229,24 @@ def get_all_capster():
         gc = get_gspread_client()
         sid = get_pos_spreadsheet_id()
         sh = gc.open_by_key(sid)
-        try:
-            ws = sh.worksheet("sheet master capster")
-        except gspread.WorksheetNotFound:
-            try:
-                ws = sh.worksheet("Master Capster")
-            except gspread.WorksheetNotFound:
-                return []
+
+        # Coba semua kemungkinan nama sheet
+        ws = None
+        sheet_names = [s.title for s in sh.worksheets()]
+        logger.info(f"[CAPSTER] Sheet tersedia: {sheet_names}")
+
+        for name in sheet_names:
+            if "capster" in name.lower():
+                ws = sh.worksheet(name)
+                logger.info(f"[CAPSTER] Pakai sheet: {name}")
+                break
+
+        if not ws:
+            logger.error(f"[CAPSTER] Sheet capster tidak ditemukan! Available: {sheet_names}")
+            return []
+
         rows = ws.get_all_values()
+        logger.info(f"[CAPSTER] Total rows: {len(rows)}, data: {rows}")
         capster = []
         for row in rows[1:]:
             if not row or not row[0]:
@@ -1244,9 +1254,10 @@ def get_all_capster():
             aktif = str(row[1]).strip().upper() if len(row) > 1 else "YA"
             if aktif in ["YA", "YES", "1", "TRUE", ""]:
                 capster.append(row[0].strip())
+        logger.info(f"[CAPSTER] Capster aktif: {capster}")
         return capster
     except Exception as e:
-        logger.error(f"[POS] get_all_capster error: {e}")
+        logger.error(f"[POS] get_all_capster error: {e}", exc_info=True)
         return []
 
 def build_capster_keyboard(capster_list):
