@@ -37,7 +37,22 @@ POS_SETUP_NAMA, POS_SETUP_HARGA, POS_SETUP_KONFIRMASI = range(30, 33)
 POS_EDIT_PILIH, POS_EDIT_FIELD, POS_EDIT_NILAI = range(33, 36)
 POS_HAPUS_PILIH, POS_HAPUS_KONFIRMASI = range(36, 38)
 
+# Edit/Hapus Produk states
+POS_EDIT_PRODUK_PILIH, POS_EDIT_PRODUK_FIELD, POS_EDIT_PRODUK_NILAI = range(38, 41)
+POS_HAPUS_PRODUK_PILIH, POS_HAPUS_PRODUK_KONFIRMASI = range(41, 43)
+
+# Tambah/Hapus Capster states
+POS_TAMBAH_CAPSTER_NAMA, POS_TAMBAH_CAPSTER_KOMISI_L, POS_TAMBAH_CAPSTER_KOMISI_P, POS_TAMBAH_CAPSTER_KOMISI_PKT, POS_TAMBAH_CAPSTER_KONFIRMASI = range(43, 48)
+POS_HAPUS_CAPSTER_PILIH, POS_HAPUS_CAPSTER_KONFIRMASI = range(48, 50)
+
+# Void transaksi states
+POS_VOID_PILIH, POS_VOID_KONFIRMASI = range(50, 52)
+
+# Cari customer multi-bulan
+CARI_CUSTOMER_BULAN = 52
+
 ADMIN_IDS = [5418153944]
+OWNER_IDS = [5418153944]  # ID owner yang dapat notif transaksi
 
 KATEGORI = [
     "Operational", "Perlengkapan",
@@ -1295,7 +1310,13 @@ async def cmd_pos_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/jual - Input transaksi\n/omzet - Omzet hari ini\n"
         f"/laporan - Rekap bulanan\n/produk - Daftar produk\n"
         f"/cari_customer - Cari history customer\n"
-        f"/tambah_produk - Tambah produk (admin)\n/batal - Batalkan"
+        f"/void - Batalkan transaksi (admin)\n"
+        f"/tambah_produk - Tambah produk (admin)\n"
+        f"/edit_produk - Edit produk (admin)\n"
+        f"/hapus_produk - Hapus produk (admin)\n"
+        f"/tambah_capster - Tambah capster (admin)\n"
+        f"/hapus_capster - Hapus capster (admin)\n"
+        f"/batal - Batalkan"
     )
 
 async def cmd_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1765,6 +1786,17 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
             ])
         user_data_temp.pop(user_id, None)
 
+        # Kirim notif ke owner
+        try:
+            await kirim_notif_owner(bot, {
+                "no_nota": no_nota, "waktu": waktu, "outlet": outlet,
+                "capster": capster, "nama_customer": nama_customer,
+                "items": [f"{i['nama']} x{i['qty']}" for i in keranjang],
+                "total": grand_total, "metode": metode,
+            })
+        except Exception as ne:
+            logger.error(f"[NOTIF] {ne}")
+
         # Konfirmasi singkat dulu
         if hasattr(reply_target, "edit_message_text"):
             await reply_target.edit_message_text("✅ Transaksi berhasil! Membuat struk...")
@@ -1807,9 +1839,16 @@ async def cmd_cari_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = " ".join(args).strip()
     msg = await update.message.reply_text(f"🔍 Mencari customer: {q}...")
 
+    # Cek apakah ada arg tambahan untuk bulan
+    bulan_arg = None
+    if len(args) > 1 and args[-1].isdigit():
+        bulan_arg = args[-1]
+        q = " ".join(args[:-1]).strip()
+
     try:
         import urllib.parse
-        url = f"{os.environ.get('BACKEND_URL', 'https://kasbot-backend-production.up.railway.app')}/api/penjualan/customer?q={urllib.parse.quote(q)}"
+        base_url = os.environ.get("BACKEND_URL", "https://kasbot-backend-production.up.railway.app")
+        url = f"{base_url}/api/penjualan/customer?q={urllib.parse.quote(q)}"
 
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1921,6 +1960,448 @@ async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # ─────────────────────────────────────────
 
+
+# ─────────────────────────────────────────
+# Edit Produk
+# ─────────────────────────────────────────
+
+async def cmd_edit_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Hanya admin.")
+        return ConversationHandler.END
+    produk = get_all_produk()
+    if not produk:
+        await update.message.reply_text("Belum ada produk.")
+        return ConversationHandler.END
+    keyboard = [[InlineKeyboardButton(f"{p['nama']} — {fmt_rupiah(p['harga'])}", callback_data=f"editprod_{p['row_idx']}")] for p in produk]
+    keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="editprod_batal")])
+    user_data_temp[user_id] = {"produk_list": produk}
+    await update.message.reply_text("✏️ Pilih produk yang ingin diedit:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return POS_EDIT_PRODUK_PILIH
+
+async def handle_edit_produk_pilih(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "editprod_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    row_idx = int(query.data.replace("editprod_", ""))
+    produk = next((p for p in user_data_temp[user_id]["produk_list"] if p["row_idx"] == row_idx), None)
+    if not produk:
+        await query.edit_message_text("❌ Produk tidak ditemukan.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["edit_produk"] = produk
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Nama", callback_data="editprod_field_nama")],
+        [InlineKeyboardButton("💰 Harga", callback_data="editprod_field_harga")],
+        [InlineKeyboardButton("📂 Kategori", callback_data="editprod_field_kategori")],
+        [InlineKeyboardButton("❌ Batalkan", callback_data="editprod_batal")],
+    ])
+    await query.edit_message_text(
+        f"Produk: {produk['nama']}
+Harga: {fmt_rupiah(produk['harga'])}
+
+Edit field mana?",
+        reply_markup=keyboard
+    )
+    return POS_EDIT_PRODUK_FIELD
+
+async def handle_edit_produk_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "editprod_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    field = query.data.replace("editprod_field_", "")
+    user_data_temp[user_id]["edit_produk_field"] = field
+    prompts = {"nama": "✏️ Ketik nama baru:", "harga": "💰 Ketik harga baru (angka):", "kategori": "📂 Ketik kategori baru (layanan/produk/paket):"}
+    await query.edit_message_text(prompts.get(field, "Ketik nilai baru:"))
+    return POS_EDIT_PRODUK_NILAI
+
+async def handle_edit_produk_nilai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nilai = update.message.text.strip()
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+    produk = user_data_temp[user_id]["edit_produk"]
+    field  = user_data_temp[user_id]["edit_produk_field"]
+    col_map = {"nama": 2, "harga": 3, "kategori": 4}
+    col = col_map.get(field)
+    if field == "harga":
+        nilai_clean = re.sub(r"[^0-9]", "", nilai)
+        if not nilai_clean:
+            await update.message.reply_text("❌ Angka tidak valid:")
+            return POS_EDIT_PRODUK_NILAI
+        nilai = fmt_rupiah(int(nilai_clean))
+    try:
+        ws = get_produk_sheet()
+        ws.update_cell(produk["row_idx"], col, nilai)
+        user_data_temp.pop(user_id, None)
+        await update.message.reply_text(f"✅ Produk {produk['nama']} berhasil diupdate!
+{field.capitalize()}: {nilai}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal: {e}")
+    return ConversationHandler.END
+
+# ─────────────────────────────────────────
+# Hapus Produk
+# ─────────────────────────────────────────
+
+async def cmd_hapus_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Hanya admin.")
+        return ConversationHandler.END
+    produk = get_all_produk()
+    if not produk:
+        await update.message.reply_text("Belum ada produk.")
+        return ConversationHandler.END
+    keyboard = [[InlineKeyboardButton(f"🗑 {p['nama']} — {fmt_rupiah(p['harga'])}", callback_data=f"hapusprod_{p['row_idx']}")] for p in produk]
+    keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="hapusprod_batal")])
+    user_data_temp[user_id] = {"produk_list": produk}
+    await update.message.reply_text("🗑️ Pilih produk yang ingin dihapus:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return POS_HAPUS_PRODUK_PILIH
+
+async def handle_hapus_produk_pilih(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "hapusprod_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    row_idx = int(query.data.replace("hapusprod_", ""))
+    produk = next((p for p in user_data_temp[user_id]["produk_list"] if p["row_idx"] == row_idx), None)
+    if not produk:
+        await query.edit_message_text("❌ Tidak ditemukan.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["hapus_produk"] = produk
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Ya, Hapus", callback_data="hapusprod_ya")],
+        [InlineKeyboardButton("❌ Batal", callback_data="hapusprod_batal")],
+    ])
+    await query.edit_message_text(f"⚠️ Hapus produk?
+
+{produk['nama']} — {fmt_rupiah(produk['harga'])}", reply_markup=keyboard)
+    return POS_HAPUS_PRODUK_KONFIRMASI
+
+async def handle_hapus_produk_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "hapusprod_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    produk = user_data_temp[user_id]["hapus_produk"]
+    try:
+        ws = get_produk_sheet()
+        # Set Aktif = TIDAK (soft delete)
+        ws.update_cell(produk["row_idx"], 5, "TIDAK")
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text(f"✅ Produk {produk['nama']} berhasil dihapus!")
+    except Exception as e:
+        await query.edit_message_text(f"❌ Gagal: {e}")
+    return ConversationHandler.END
+
+# ─────────────────────────────────────────
+# Tambah & Hapus Capster
+# ─────────────────────────────────────────
+
+def get_capster_sheet():
+    gc = get_gspread_client()
+    sid = get_pos_spreadsheet_id()
+    sh = gc.open_by_key(sid)
+    sheet_names = [s.title for s in sh.worksheets()]
+    for name in sheet_names:
+        if "capster" in name.lower():
+            return sh.worksheet(name)
+    ws = sh.add_worksheet(title="master capster", rows=200, cols=5)
+    ws.append_row(["nama", "aktif", "komisi layanan", "komisi produk", "paket"])
+    return ws
+
+async def cmd_tambah_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Hanya admin.")
+        return ConversationHandler.END
+    user_data_temp[user_id] = {"action": "tambah_capster"}
+    await update.message.reply_text("➕ Nama capster baru:")
+    return POS_TAMBAH_CAPSTER_NAMA
+
+async def handle_tambah_capster_nama(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nama = update.message.text.strip()
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["capster_nama"] = nama
+    await update.message.reply_text(f"Nama: {nama}
+
+💰 Komisi layanan (%):
+Contoh: 10")
+    return POS_TAMBAH_CAPSTER_KOMISI_L
+
+async def handle_tambah_capster_komisi_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    val = re.sub(r"[^0-9.]", "", update.message.text.strip())
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["komisi_l"] = val + "%"
+    await update.message.reply_text(f"Komisi layanan: {val}%
+
+💰 Komisi produk (%):
+Contoh: 10")
+    return POS_TAMBAH_CAPSTER_KOMISI_P
+
+async def handle_tambah_capster_komisi_p(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    val = re.sub(r"[^0-9.]", "", update.message.text.strip())
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["komisi_p"] = val + "%"
+    await update.message.reply_text(f"Komisi produk: {val}%
+
+💰 Komisi paket (%):
+Contoh: 10")
+    return POS_TAMBAH_CAPSTER_KOMISI_PKT
+
+async def handle_tambah_capster_komisi_pkt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    val = re.sub(r"[^0-9.]", "", update.message.text.strip())
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+    user_data_temp[user_id]["komisi_pkt"] = val + "%"
+    temp = user_data_temp[user_id]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Simpan", callback_data="tambahcap_simpan")],
+        [InlineKeyboardButton("❌ Batalkan", callback_data="tambahcap_batal")],
+    ])
+    await update.message.reply_text(
+        f"📋 Konfirmasi:
+Nama: {temp['capster_nama']}
+"
+        f"Komisi Layanan: {temp['komisi_l']}
+"
+        f"Komisi Produk: {temp['komisi_p']}
+"
+        f"Komisi Paket: {temp['komisi_pkt']}
+
+Simpan?",
+        reply_markup=keyboard
+    )
+    return POS_TAMBAH_CAPSTER_KONFIRMASI
+
+async def handle_tambah_capster_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "tambahcap_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    temp = user_data_temp[user_id]
+    try:
+        ws = get_capster_sheet()
+        ws.append_row([temp["capster_nama"], "YA", temp["komisi_l"], temp["komisi_p"], temp["komisi_pkt"]])
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text(f"✅ Capster {temp['capster_nama']} berhasil ditambahkan!")
+    except Exception as e:
+        await query.edit_message_text(f"❌ Gagal: {e}")
+    return ConversationHandler.END
+
+async def cmd_hapus_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Hanya admin.")
+        return ConversationHandler.END
+    capster = get_all_capster()
+    if not capster:
+        await update.message.reply_text("Belum ada capster.")
+        return ConversationHandler.END
+    keyboard = [[InlineKeyboardButton(f"🗑 {c}", callback_data=f"hapuscap_{c}")] for c in capster]
+    keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="hapuscap_batal")])
+    user_data_temp[user_id] = {"capster_list": capster}
+    await update.message.reply_text("🗑️ Pilih capster yang ingin dihapus:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return POS_HAPUS_CAPSTER_PILIH
+
+async def handle_hapus_capster_pilih(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "hapuscap_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    nama = query.data.replace("hapuscap_", "")
+    user_data_temp[user_id]["hapus_capster"] = nama
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Ya, Hapus", callback_data="hapuscap_ya")],
+        [InlineKeyboardButton("❌ Batal", callback_data="hapuscap_batal")],
+    ])
+    await query.edit_message_text(f"⚠️ Hapus capster {nama}?", reply_markup=keyboard)
+    return POS_HAPUS_CAPSTER_KONFIRMASI
+
+async def handle_hapus_capster_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "hapuscap_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    nama = user_data_temp[user_id]["hapus_capster"]
+    try:
+        ws = get_capster_sheet()
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[1:], start=2):
+            if row and row[0].strip().lower() == nama.lower():
+                ws.update_cell(i, 2, "TIDAK")
+                break
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text(f"✅ Capster {nama} berhasil dihapus!")
+    except Exception as e:
+        await query.edit_message_text(f"❌ Gagal: {e}")
+    return ConversationHandler.END
+
+# ─────────────────────────────────────────
+# Void Transaksi
+# ─────────────────────────────────────────
+
+async def cmd_void(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Hanya admin.")
+        return ConversationHandler.END
+    try:
+        ws = get_pos_sheet()
+        rows = ws.get_all_values()
+        # Ambil 10 transaksi terbaru (unique no_nota)
+        seen = set()
+        trx_list = []
+        for i, row in enumerate(reversed(rows[1:]), start=1):
+            if not row or not row[0]: continue
+            nota = row[0]
+            if nota not in seen:
+                seen.add(nota)
+                real_idx = len(rows) - i
+                trx_list.append({
+                    "row_idx": real_idx,
+                    "no_nota": nota,
+                    "waktu": row[1] if len(row) > 1 else "",
+                    "capster": row[4] if len(row) > 4 else "",
+                    "total": row[10] if len(row) > 10 else "0",
+                    "status": row[14] if len(row) > 14 else "",
+                })
+            if len(trx_list) >= 10: break
+
+        if not trx_list:
+            await update.message.reply_text("Belum ada transaksi.")
+            return ConversationHandler.END
+
+        keyboard = []
+        for t in trx_list:
+            if t["status"] == "VOID": continue
+            label = f"🧾 {t['no_nota'][-6:]} | {t['capster']} | {t['total']}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"void_{t['no_nota']}")])
+        keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="void_batal")])
+
+        user_data_temp[user_id] = {"void_rows": rows, "void_trx": trx_list}
+        await update.message.reply_text(
+            "🚫 Pilih transaksi yang ingin di-void:
+(10 transaksi terbaru)",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return POS_VOID_PILIH
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal: {e}")
+        return ConversationHandler.END
+
+async def handle_void_pilih(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "void_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    no_nota = query.data.replace("void_", "")
+    user_data_temp[user_id]["void_nota"] = no_nota
+    trx = next((t for t in user_data_temp[user_id]["void_trx"] if t["no_nota"] == no_nota), None)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 Ya, Void Transaksi", callback_data="void_konfirmasi_ya")],
+        [InlineKeyboardButton("❌ Batal", callback_data="void_batal")],
+    ])
+    await query.edit_message_text(
+        f"⚠️ Void transaksi?
+
+No: {no_nota}
+Capster: {trx['capster'] if trx else '-'}
+Waktu: {trx['waktu'] if trx else '-'}
+
+Status akan diubah jadi VOID.",
+        reply_markup=keyboard
+    )
+    return POS_VOID_KONFIRMASI
+
+async def handle_void_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == "void_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+    no_nota = user_data_temp[user_id]["void_nota"]
+    voided_by = update.effective_user.first_name or "Admin"
+    try:
+        ws = get_pos_sheet()
+        rows = ws.get_all_values()
+        updates = []
+        for i, row in enumerate(rows[1:], start=2):
+            if row and row[0] == no_nota:
+                updates.append({"range": f"O{i}", "values": [[f"VOID - {voided_by} {datetime.now().strftime('%d/%m/%Y %H:%M')}"]]})
+        if updates:
+            ws.batch_update(updates)
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text(f"✅ Transaksi {no_nota} berhasil di-VOID!
+👤 Oleh: {voided_by}")
+    except Exception as e:
+        await query.edit_message_text(f"❌ Gagal void: {e}")
+    return ConversationHandler.END
+
+# ─────────────────────────────────────────
+# Notifikasi transaksi ke owner
+# ─────────────────────────────────────────
+
+async def kirim_notif_owner(bot, transaksi_data):
+    """Kirim notifikasi ke semua owner saat ada transaksi baru"""
+    try:
+        for owner_id in OWNER_IDS:
+            text = (
+                f"🔔 *Transaksi Baru!*\n\n"
+                f"🧾 {transaksi_data['no_nota']}\n"
+                f"🕐 {transaksi_data['waktu']}\n"
+                f"✂️ Capster: {transaksi_data['capster']}\n"
+                f"👤 Customer: {transaksi_data['nama_customer']}\n"
+                f"🛒 {', '.join(transaksi_data['items'])}\n"
+                f"💰 {fmt_rupiah(transaksi_data['total'])} — {transaksi_data['metode']}\n"
+                f"🏪 {transaksi_data['outlet']}"
+            )
+            await bot.send_message(chat_id=owner_id, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"[NOTIF] Gagal kirim notif: {e}")
+
+
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
@@ -2004,12 +2485,71 @@ def main():
         per_chat=False, per_user=True,
     )
 
+    edit_produk_handler = ConversationHandler(
+        entry_points=[CommandHandler("edit_produk", cmd_edit_produk)],
+        states={
+            POS_EDIT_PRODUK_PILIH: [CallbackQueryHandler(handle_edit_produk_pilih, pattern="^editprod_")],
+            POS_EDIT_PRODUK_FIELD: [CallbackQueryHandler(handle_edit_produk_field, pattern="^editprod_field_|^editprod_batal")],
+            POS_EDIT_PRODUK_NILAI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_produk_nilai)],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
+    hapus_produk_handler = ConversationHandler(
+        entry_points=[CommandHandler("hapus_produk", cmd_hapus_produk)],
+        states={
+            POS_HAPUS_PRODUK_PILIH: [CallbackQueryHandler(handle_hapus_produk_pilih, pattern="^hapusprod_")],
+            POS_HAPUS_PRODUK_KONFIRMASI: [CallbackQueryHandler(handle_hapus_produk_konfirmasi, pattern="^hapusprod_")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
+    tambah_capster_handler = ConversationHandler(
+        entry_points=[CommandHandler("tambah_capster", cmd_tambah_capster)],
+        states={
+            POS_TAMBAH_CAPSTER_NAMA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tambah_capster_nama)],
+            POS_TAMBAH_CAPSTER_KOMISI_L: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tambah_capster_komisi_l)],
+            POS_TAMBAH_CAPSTER_KOMISI_P: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tambah_capster_komisi_p)],
+            POS_TAMBAH_CAPSTER_KOMISI_PKT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tambah_capster_komisi_pkt)],
+            POS_TAMBAH_CAPSTER_KONFIRMASI: [CallbackQueryHandler(handle_tambah_capster_konfirmasi, pattern="^tambahcap_")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
+    hapus_capster_handler = ConversationHandler(
+        entry_points=[CommandHandler("hapus_capster", cmd_hapus_capster)],
+        states={
+            POS_HAPUS_CAPSTER_PILIH: [CallbackQueryHandler(handle_hapus_capster_pilih, pattern="^hapuscap_")],
+            POS_HAPUS_CAPSTER_KONFIRMASI: [CallbackQueryHandler(handle_hapus_capster_konfirmasi, pattern="^hapuscap_")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
+    void_handler = ConversationHandler(
+        entry_points=[CommandHandler("void", cmd_void)],
+        states={
+            POS_VOID_PILIH: [CallbackQueryHandler(handle_void_pilih, pattern="^void_")],
+            POS_VOID_KONFIRMASI: [CallbackQueryHandler(handle_void_konfirmasi, pattern="^void_konfirmasi_|^void_batal")],
+        },
+        fallbacks=[CommandHandler("batal", handle_cancel)],
+        per_chat=False, per_user=True,
+    )
+
     app.add_handler(input_handler)
     app.add_handler(edit_handler)
     app.add_handler(delete_handler)
     app.add_handler(reset_handler)
     app.add_handler(jual_handler)
     app.add_handler(tambah_produk_handler)
+    app.add_handler(edit_produk_handler)
+    app.add_handler(hapus_produk_handler)
+    app.add_handler(tambah_capster_handler)
+    app.add_handler(hapus_capster_handler)
+    app.add_handler(void_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cek", cmd_cek))
     app.add_handler(CommandHandler("total", cmd_total))
