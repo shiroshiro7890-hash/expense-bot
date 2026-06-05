@@ -2000,11 +2000,10 @@ async def handle_edit_produk_pilih(update: Update, context: ContextTypes.DEFAULT
         [InlineKeyboardButton("📂 Kategori", callback_data="editprod_field_kategori")],
         [InlineKeyboardButton("❌ Batalkan", callback_data="editprod_batal")],
     ])
+    nama_p = produk["nama"]
+    harga_p = fmt_rupiah(produk["harga"])
     await query.edit_message_text(
-        f"Produk: {produk['nama']}
-Harga: {fmt_rupiah(produk['harga'])}
-
-Edit field mana?",
+        f"Produk: {nama_p}\nHarga: {harga_p}\n\nEdit field mana?",
         reply_markup=keyboard
     )
     return POS_EDIT_PRODUK_FIELD
@@ -2043,8 +2042,8 @@ async def handle_edit_produk_nilai(update: Update, context: ContextTypes.DEFAULT
         ws = get_produk_sheet()
         ws.update_cell(produk["row_idx"], col, nilai)
         user_data_temp.pop(user_id, None)
-        await update.message.reply_text(f"✅ Produk {produk['nama']} berhasil diupdate!
-{field.capitalize()}: {nilai}")
+        nama_p = produk["nama"]
+        await update.message.reply_text(f"✅ Produk {nama_p} berhasil diupdate!\n{field.capitalize()}: {nilai}")
     except Exception as e:
         await update.message.reply_text(f"❌ Gagal: {e}")
     return ConversationHandler.END
@@ -2086,9 +2085,9 @@ async def handle_hapus_produk_pilih(update: Update, context: ContextTypes.DEFAUL
         [InlineKeyboardButton("🗑️ Ya, Hapus", callback_data="hapusprod_ya")],
         [InlineKeyboardButton("❌ Batal", callback_data="hapusprod_batal")],
     ])
-    await query.edit_message_text(f"⚠️ Hapus produk?
-
-{produk['nama']} — {fmt_rupiah(produk['harga'])}", reply_markup=keyboard)
+    nama_p = produk["nama"]
+    harga_p = fmt_rupiah(produk["harga"])
+    await query.edit_message_text(f"⚠️ Hapus produk?\n\n{nama_p} — {harga_p}", reply_markup=keyboard)
     return POS_HAPUS_PRODUK_KONFIRMASI
 
 async def handle_hapus_produk_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2142,10 +2141,7 @@ async def handle_tambah_capster_nama(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("⚠️ Session expired.")
         return ConversationHandler.END
     user_data_temp[user_id]["capster_nama"] = nama
-    await update.message.reply_text(f"Nama: {nama}
-
-💰 Komisi layanan (%):
-Contoh: 10")
+    await update.message.reply_text(f"Nama: {nama}\n\n💰 Komisi layanan (%):\nContoh: 10")
     return POS_TAMBAH_CAPSTER_KOMISI_L
 
 async def handle_tambah_capster_komisi_l(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2155,10 +2151,7 @@ async def handle_tambah_capster_komisi_l(update: Update, context: ContextTypes.D
         await update.message.reply_text("⚠️ Session expired.")
         return ConversationHandler.END
     user_data_temp[user_id]["komisi_l"] = val + "%"
-    await update.message.reply_text(f"Komisi layanan: {val}%
-
-💰 Komisi produk (%):
-Contoh: 10")
+    await update.message.reply_text(f"Komisi layanan: {val}%\n\n💰 Komisi produk (%):\nContoh: 10")
     return POS_TAMBAH_CAPSTER_KOMISI_P
 
 async def handle_tambah_capster_komisi_p(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2168,10 +2161,7 @@ async def handle_tambah_capster_komisi_p(update: Update, context: ContextTypes.D
         await update.message.reply_text("⚠️ Session expired.")
         return ConversationHandler.END
     user_data_temp[user_id]["komisi_p"] = val + "%"
-    await update.message.reply_text(f"Komisi produk: {val}%
-
-💰 Komisi paket (%):
-Contoh: 10")
+    await update.message.reply_text(f"Komisi produk: {val}%\n\n💰 Komisi paket (%):\nContoh: 10")
     return POS_TAMBAH_CAPSTER_KOMISI_PKT
 
 async def handle_tambah_capster_komisi_pkt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2186,17 +2176,12 @@ async def handle_tambah_capster_komisi_pkt(update: Update, context: ContextTypes
         [InlineKeyboardButton("✅ Simpan", callback_data="tambahcap_simpan")],
         [InlineKeyboardButton("❌ Batalkan", callback_data="tambahcap_batal")],
     ])
+    cn = temp["capster_nama"]
+    kl = temp["komisi_l"]
+    kp = temp["komisi_p"]
+    kpkt = temp["komisi_pkt"]
     await update.message.reply_text(
-        f"📋 Konfirmasi:
-Nama: {temp['capster_nama']}
-"
-        f"Komisi Layanan: {temp['komisi_l']}
-"
-        f"Komisi Produk: {temp['komisi_p']}
-"
-        f"Komisi Paket: {temp['komisi_pkt']}
-
-Simpan?",
+        f"📋 Konfirmasi:\nNama: {cn}\nKomisi Layanan: {kl}\nKomisi Produk: {kp}\nKomisi Paket: {kpkt}\n\nSimpan?",
         reply_markup=keyboard
     )
     return POS_TAMBAH_CAPSTER_KONFIRMASI
@@ -2317,8 +2302,7 @@ async def cmd_void(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_data_temp[user_id] = {"void_rows": rows, "void_trx": trx_list}
         await update.message.reply_text(
-            "🚫 Pilih transaksi yang ingin di-void:
-(10 transaksi terbaru)",
+            "🚫 Pilih transaksi yang ingin di-void:\n(10 transaksi terbaru)",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return POS_VOID_PILIH
@@ -2341,14 +2325,10 @@ async def handle_void_pilih(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚫 Ya, Void Transaksi", callback_data="void_konfirmasi_ya")],
         [InlineKeyboardButton("❌ Batal", callback_data="void_batal")],
     ])
+    cap = trx["capster"] if trx else "-"
+    wkt = trx["waktu"] if trx else "-"
     await query.edit_message_text(
-        f"⚠️ Void transaksi?
-
-No: {no_nota}
-Capster: {trx['capster'] if trx else '-'}
-Waktu: {trx['waktu'] if trx else '-'}
-
-Status akan diubah jadi VOID.",
+        f"⚠️ Void transaksi?\n\nNo: {no_nota}\nCapster: {cap}\nWaktu: {wkt}\n\nStatus akan diubah jadi VOID.",
         reply_markup=keyboard
     )
     return POS_VOID_KONFIRMASI
@@ -2373,8 +2353,7 @@ async def handle_void_konfirmasi(update: Update, context: ContextTypes.DEFAULT_T
         if updates:
             ws.batch_update(updates)
         user_data_temp.pop(user_id, None)
-        await query.edit_message_text(f"✅ Transaksi {no_nota} berhasil di-VOID!
-👤 Oleh: {voided_by}")
+        await query.edit_message_text(f"✅ Transaksi {no_nota} berhasil di-VOID!\n👤 Oleh: {voided_by}")
     except Exception as e:
         await query.edit_message_text(f"❌ Gagal void: {e}")
     return ConversationHandler.END
