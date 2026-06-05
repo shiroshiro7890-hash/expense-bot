@@ -32,7 +32,7 @@ EDIT_PILIH_TRANSAKSI, EDIT_PILIH_FIELD, EDIT_INPUT_NILAI = range(8, 11)
 DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 RESET_KONFIRMASI = 13
 
-POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI, POS_INPUT_CAPSTER, POS_INPUT_NAMA_CUSTOMER, POS_INPUT_HP_CUSTOMER = range(14, 21)
+POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI, POS_INPUT_CAPSTER, POS_INPUT_NAMA_CUSTOMER, POS_INPUT_HP_CUSTOMER, POS_PILIH_CAPSTER = range(14, 22)
 POS_SETUP_NAMA, POS_SETUP_HARGA, POS_SETUP_KONFIRMASI = range(18, 21)
 POS_EDIT_PILIH, POS_EDIT_FIELD, POS_EDIT_NILAI = range(21, 24)
 POS_HAPUS_PILIH, POS_HAPUS_KONFIRMASI = range(24, 26)
@@ -1223,6 +1223,39 @@ def get_omzet_hari_ini(outlet=None):
         logger.error(f"[POS] omzet error: {e}")
         return 0, 0
 
+def get_all_capster():
+    """Ambil semua capster aktif dari sheet Master Capster"""
+    try:
+        gc = get_gspread_client()
+        sid = get_pos_spreadsheet_id()
+        sh = gc.open_by_key(sid)
+        try:
+            ws = sh.worksheet("sheet master capster")
+        except gspread.WorksheetNotFound:
+            try:
+                ws = sh.worksheet("Master Capster")
+            except gspread.WorksheetNotFound:
+                return []
+        rows = ws.get_all_values()
+        capster = []
+        for row in rows[1:]:
+            if not row or not row[0]:
+                continue
+            aktif = str(row[1]).strip().upper() if len(row) > 1 else "YA"
+            if aktif in ["YA", "YES", "1", "TRUE", ""]:
+                capster.append(row[0].strip())
+        return capster
+    except Exception as e:
+        logger.error(f"[POS] get_all_capster error: {e}")
+        return []
+
+def build_capster_keyboard(capster_list):
+    keyboard = []
+    for nama in capster_list:
+        keyboard.append([InlineKeyboardButton(f"✂️ {nama}", callback_data=f"pos_capster_{nama}")])
+    keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="pos_batal")])
+    return InlineKeyboardMarkup(keyboard)
+
 def build_produk_keyboard(produk_list, selected=None):
     keyboard = []
     for p in produk_list:
@@ -1414,8 +1447,37 @@ async def handle_pos_keranjang_action(update: Update, context: ContextTypes.DEFA
         keranjang = user_data_temp[user_id]["keranjang"]
         grand_total = sum(i["subtotal"] for i in keranjang)
         user_data_temp[user_id]["grand_total"] = grand_total
-        await query.edit_message_text(f"💰 Total: {fmt_rupiah(grand_total)}\n\n✂️ Nama capster:")
-        return POS_INPUT_CAPSTER
+        capster_list = get_all_capster()
+        if not capster_list:
+            await query.edit_message_text(f"💰 Total: {fmt_rupiah(grand_total)}\n\n✂️ Ketik nama capster:")
+            return POS_INPUT_CAPSTER
+        user_data_temp[user_id]["capster_list"] = capster_list
+        await query.edit_message_text(
+            f"💰 Total: {fmt_rupiah(grand_total)}\n\n✂️ Pilih capster:",
+            reply_markup=build_capster_keyboard(capster_list)
+        )
+        return POS_PILIH_CAPSTER
+
+async def handle_pos_pilih_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "pos_batal":
+        user_data_temp.pop(user_id, None)
+        await query.edit_message_text("❌ Dibatalkan.")
+        return ConversationHandler.END
+
+    if user_id not in user_data_temp:
+        await query.edit_message_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    capster = query.data.replace("pos_capster_", "")
+    user_data_temp[user_id]["capster"] = capster
+    await query.edit_message_text(
+        f"✂️ Capster: {capster}\n\n👤 Nama customer:\n(Ketik '-' jika tidak mau isi)"
+    )
+    return POS_INPUT_NAMA_CUSTOMER
 
 async def handle_pos_input_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1827,6 +1889,7 @@ def main():
                 CallbackQueryHandler(handle_pos_pilih_produk, pattern="^pos_produk_"),
             ],
             POS_INPUT_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_qty)],
+            POS_PILIH_CAPSTER: [CallbackQueryHandler(handle_pos_pilih_capster, pattern="^pos_capster_|^pos_batal$")],
             POS_INPUT_CAPSTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_capster)],
             POS_INPUT_NAMA_CUSTOMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_nama_customer)],
             POS_INPUT_HP_CUSTOMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_hp_customer)],
