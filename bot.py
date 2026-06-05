@@ -1155,23 +1155,14 @@ def get_sheet_name_pos(dt=None):
 def get_pos_spreadsheet_id(chat_title=None):
     """Ambil Spreadsheet ID berdasar nama group Telegram (multi-outlet)"""
     if chat_title:
-        # Normalisasi nama group: uppercase, spasi -> underscore, hapus karakter non-alphanumeric
-        import re
         key = re.sub(r'[^A-Z0-9]', '_', chat_title.upper().strip())
         key = re.sub(r'_+', '_', key).strip('_')
         env_key = f"OUTLET_{key}"
         sid = os.environ.get(env_key)
         if sid:
-            logger.info(f"[OUTLET] {chat_title} -> {env_key} -> {sid[:10]}...")
+            logger.info(f"[OUTLET] Match: {chat_title} -> {env_key}")
             return sid
-        # Coba partial match
-        for k, v in os.environ.items():
-            if k.startswith("OUTLET_") and any(
-                word in k for word in key.split("_") if len(word) > 2
-            ):
-                logger.info(f"[OUTLET] Partial match: {chat_title} -> {k}")
-                return v
-        logger.warning(f"[OUTLET] Tidak ada match untuk '{chat_title}' (key: {env_key}), pakai default")
+        logger.warning(f"[OUTLET] Tidak ada match untuk '{chat_title}' (key: {env_key}), pakai SPREADSHEET_ID_POS")
     return os.environ.get("SPREADSHEET_ID_POS", os.environ.get("SPREADSHEET_ID_KAS_BESAR"))
 
 def get_pos_sheet(dt=None, chat_title=None):
