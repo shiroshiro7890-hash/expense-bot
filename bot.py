@@ -1,135 +1,82 @@
-def generate_struk_pdf(outlet, no_nota, waktu, kasir, capster, nama_customer,
-                       hp_customer, keranjang, grand_total, tunai, kembalian, metode):
-    """Generate struk PDF siap print thermal 58mm, return BytesIO."""
+# ═══════════════════════════════════════════════════════
+# PATCH 3A: Fix fallback bahaya di get_pos_spreadsheet_id()
+# Ganti fungsi yang lama dengan ini
+# ═══════════════════════════════════════════════════════
+
+def get_pos_spreadsheet_id(chat_title=None):
+    """Ambil Spreadsheet ID berdasar nama group Telegram (multi-outlet)"""
+    if chat_title:
+        key = re.sub(r'[^A-Z0-9]', '_', chat_title.upper().strip())
+        key = re.sub(r'_+', '_', key).strip('_')
+        env_key = f"OUTLET_{key}"
+        sid = os.environ.get(env_key)
+        if sid:
+            logger.info(f"[OUTLET] Match: {chat_title} -> {env_key}")
+            return sid
+        logger.warning(f"[OUTLET] Tidak ada match untuk '{chat_title}' (key: {env_key})")
+
+    # Fallback ke SPREADSHEET_ID_POS — JANGAN fallback ke KAS BESAR!
+    sid = os.environ.get("SPREADSHEET_ID_POS")
+    if sid:
+        logger.info(f"[OUTLET] Pakai SPREADSHEET_ID_POS sebagai default")
+        return sid
+
+    # Tidak ada fallback ke KAS BESAR — raise error supaya ketahuan
+    raise ValueError(
+        f"[OUTLET] Spreadsheet ID tidak ditemukan untuk outlet '{chat_title}'. "
+        f"Tambahkan env var OUTLET_{re.sub(r'[^A-Z0-9]', '_', (chat_title or '').upper()).strip('_')} "
+        f"atau SPREADSHEET_ID_POS di Railway."
+    )
+
+
+# ═══════════════════════════════════════════════════════
+# PATCH 3B: processed_hashes persistent ke file
+# Tambahkan di bagian atas file, setelah semua import
+# ═══════════════════════════════════════════════════════
+
+import json
+import os
+
+HASHES_FILE = "processed_hashes.json"
+
+def load_processed_hashes():
+    """Load processed hashes dari file saat bot start."""
     try:
-        from fpdf import FPDF
-
-        W   = 58   # lebar kertas thermal 58mm
-        PAD = 2    # margin kiri & kanan
-
-        pdf = FPDF(orientation='P', unit='mm', format=(W, 297))
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=3)
-        pdf.set_margins(PAD, PAD, PAD)
-        pdf.set_text_color(0, 0, 0)
-
-        CW = W - PAD * 2   # content width = 54mm
-
-        # ── Helpers ──────────────────────────────────────────
-
-        def ln_gap(h=1):
-            pdf.ln(h)
-
-        def center(text, size=8, bold=False):
-            pdf.set_font('Helvetica', 'B' if bold else '', size)
-            pdf.set_x(PAD)
-            pdf.cell(CW, size * 0.45, str(text), align='C', ln=True)
-
-        def separator(char='─', size=7):
-            line = char * 32
-            pdf.set_font('Courier', '', size)
-            pdf.set_x(PAD)
-            pdf.cell(CW, 4, line, align='C', ln=True)
-
-        def row_lr(label, value, size=8, bold_label=False, bold_val=True):
-            """Row dengan label kiri & value kanan."""
-            label_w = 22
-            val_w   = CW - label_w
-            pdf.set_x(PAD)
-            pdf.set_font('Helvetica', 'B' if bold_label else '', size)
-            pdf.cell(label_w, 5, str(label))
-            pdf.set_font('Helvetica', 'B' if bold_val else '', size)
-            pdf.cell(val_w, 5, str(value), align='R', ln=True)
-
-        def full_row(text, size=8, bold=False, align='L'):
-            pdf.set_font('Helvetica', 'B' if bold else '', size)
-            pdf.set_x(PAD)
-            pdf.cell(CW, 5, str(text), align=align, ln=True)
-
-        # ── HEADER ───────────────────────────────────────────
-        brand = (outlet.upper()
-                 .replace('BARBERSHOP POS', '')
-                 .replace(' POS', '')
-                 .strip())
-
-        ln_gap(2)
-        separator('=')
-        center(brand, size=14, bold=True)
-        ln_gap(1)
-        center('BARBERSHOP', size=8)
-        separator('=')
-        ln_gap(1)
-        center(no_nota, size=8)
-        center(waktu,   size=8)
-        ln_gap(1)
-        separator()
-
-        # ── INFO ─────────────────────────────────────────────
-        ln_gap(1)
-        row_lr('Kasir',   str(kasir),   bold_val=False)
-        row_lr('Capster', str(capster), bold_val=False)
-        if nama_customer and nama_customer not in ('-', ''):
-            row_lr('Customer', str(nama_customer), bold_val=False)
-        if hp_customer and hp_customer not in ('-', ''):
-            row_lr('HP', str(hp_customer), bold_val=False)
-        ln_gap(1)
-        separator()
-
-        # ── ITEMS ─────────────────────────────────────────────
-        ln_gap(1)
-        for item in keranjang:
-            # Nama produk — bold
-            full_row(item['nama'], size=9, bold=True)
-
-            # Qty x harga (kiri) | subtotal (kanan)
-            label_w = 28
-            val_w   = CW - label_w
-            pdf.set_x(PAD)
-            pdf.set_font('Helvetica', '', 8)
-            pdf.cell(label_w, 5, f"  {item['qty']} x {fmt_rupiah(item['harga'])}")
-            pdf.set_font('Helvetica', 'B', 8)
-            pdf.cell(val_w, 5, fmt_rupiah(item['subtotal']), align='R', ln=True)
-            ln_gap(1)
-
-        separator()
-
-        # ── TUNAI & KEMBALI ───────────────────────────────────
-        if tunai > 0:
-            ln_gap(1)
-            row_lr('Tunai',   fmt_rupiah(tunai),    size=8, bold_val=False)
-            row_lr('Kembali', fmt_rupiah(kembalian), size=8, bold_val=False)
-
-        # ── TOTAL ─────────────────────────────────────────────
-        ln_gap(1)
-        separator('-')
-        label_w = 20
-        val_w   = CW - label_w
-        pdf.set_x(PAD)
-        pdf.set_font('Helvetica', 'B', 13)
-        pdf.cell(label_w, 8, 'TOTAL')
-        pdf.set_font('Helvetica', 'B', 13)
-        pdf.cell(val_w, 8, fmt_rupiah(grand_total), align='R', ln=True)
-        separator('-')
-
-        # ── METODE BAYAR ──────────────────────────────────────
-        ln_gap(1)
-        row_lr('Metode Bayar', str(metode), size=8, bold_val=False)
-        ln_gap(1)
-
-        # ── FOOTER ────────────────────────────────────────────
-        separator('=')
-        ln_gap(1)
-        center('Terima kasih!', size=10, bold=True)
-        ln_gap(1)
-        center('kasbot.id', size=7)
-        ln_gap(1)
-        separator('=')
-        ln_gap(3)
-
-        buf = io.BytesIO(pdf.output())
-        buf.seek(0)
-        return buf
-
+        if os.path.exists(HASHES_FILE):
+            with open(HASHES_FILE, 'r') as f:
+                data = json.load(f)
+                hashes = set(data.get('hashes', []))
+                logger.info(f"[HASH] Loaded {len(hashes)} processed hashes dari file")
+                return hashes
     except Exception as e:
-        logger.error(f"[PDF] Gagal generate: {e}", exc_info=True)
-        return None
+        logger.error(f"[HASH] Gagal load hashes: {e}")
+    return set()
+
+def save_processed_hashes(hashes):
+    """Simpan processed hashes ke file."""
+    try:
+        with open(HASHES_FILE, 'w') as f:
+            json.dump({'hashes': list(hashes)}, f)
+    except Exception as e:
+        logger.error(f"[HASH] Gagal save hashes: {e}")
+
+# ── Ganti inisialisasi processed_hashes ──────────────────
+# SEBELUM: processed_hashes = set()
+# SESUDAH:
+processed_hashes = load_processed_hashes()
+
+
+# ═══════════════════════════════════════════════════════
+# PATCH 3C: Update handle_photo() — simpan hash ke file
+# Cari baris: processed_hashes.add(foto_hash)
+# Tambahkan baris berikutnya:
+# ═══════════════════════════════════════════════════════
+
+# SEBELUM:
+#   processed_hashes.add(foto_hash)
+#   user_data_temp.pop(user_id, None)
+
+# SESUDAH:
+#   processed_hashes.add(foto_hash)
+#   save_processed_hashes(processed_hashes)  # ← tambahkan ini
+#   user_data_temp.pop(user_id, None)
