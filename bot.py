@@ -1202,7 +1202,25 @@ def get_produk_sheet(chat_title=None):
 
 def get_all_produk(chat_title=None):
     try:
-        ws = get_produk_sheet(chat_title)
+        gc = get_gspread_client()
+        sid = get_pos_spreadsheet_id(chat_title)
+        sh = gc.open_by_key(sid)
+
+        # Cari sheet produk dengan nama fleksibel
+        ws = None
+        for s in sh.worksheets():
+            if 'produk' in s.title.lower():
+                ws = s
+                logger.info(f"[PRODUK] Pakai sheet: {s.title}")
+                break
+
+        if not ws:
+            # Buat sheet baru kalau tidak ada
+            logger.warning(f"[PRODUK] Sheet produk tidak ditemukan, buat baru")
+            ws = sh.add_worksheet(title="Master Produk", rows=200, cols=6)
+            ws.append_row(["Kode", "Nama Produk", "Harga", "Kategori", "Aktif", "Dibuat"])
+            return []
+
         rows = ws.get_all_values()
         produk = []
         for i, row in enumerate(rows[1:], start=2):
@@ -1210,15 +1228,17 @@ def get_all_produk(chat_title=None):
                 continue
             aktif = str(row[4]).strip().upper() if len(row) > 4 else "YA"
             if aktif in ["YA", "YES", "1", "TRUE", ""]:
+                harga_raw = re.sub(r"[^0-9]", "", str(row[2])) if len(row) > 2 and row[2] else "0"
                 produk.append({
                     "row_idx": i, "kode": row[0],
                     "nama": row[1] if len(row) > 1 else "",
-                    "harga": int(re.sub(r"[^0-9]", "", str(row[2]))) if len(row) > 2 and row[2] else 0,
+                    "harga": int(harga_raw) if harga_raw else 0,
                     "kategori": row[3] if len(row) > 3 else "",
                 })
+        logger.info(f"[PRODUK] {len(produk)} produk ditemukan dari {chat_title}")
         return produk
     except Exception as e:
-        logger.error(f"[POS] get_all_produk error: {e}")
+        logger.error(f"[POS] get_all_produk error: {e}", exc_info=True)
         return []
 
 def generate_no_nota(outlet):
