@@ -1501,110 +1501,154 @@ async def handle_pos_input_tunai(update: Update, context: ContextTypes.DEFAULT_T
 
 def generate_struk_image(outlet, no_nota, waktu, kasir, capster, nama_customer,
                          hp_customer, keranjang, grand_total, tunai, kembalian, metode):
-    """Generate struk sebagai PNG, return bytes."""
+    """Generate struk PNG modern minimal, return BytesIO."""
     from PIL import Image, ImageDraw, ImageFont
 
-    # Ukuran 80mm thermal printer @ 203dpi = 640px wide
-    W = 640
-    PAD = 24
-    LINE_H = 36
-    LINE_H_SM = 28
+    W       = 640
+    PAD     = 36
+    WHITE   = (255, 255, 255)
+    BLACK   = (26,  26,  26)
+    DARK    = (26,  26,  26)
+    DGRAY   = (100, 100, 100)
+    LGRAY   = (200, 200, 200)
+    LLGRAY  = (245, 245, 243)
 
-    # Hitung tinggi dulu
-    n_lines = 10  # header + footer tetap
-    n_lines += len(keranjang) * 3
-    if nama_customer != "-": n_lines += 1
-    if hp_customer != "-": n_lines += 1
-    if tunai > 0: n_lines += 2
-    H = PAD * 4 + n_lines * LINE_H + 120
+    # Font
+    FONT_PATHS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    def load_font(size, bold=False):
+        paths = [p for p in FONT_PATHS if ("Bold" in p) == bold]
+        for p in paths:
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
 
-    img = Image.new("RGB", (W, H), color=(255, 255, 255))
+    f_brand   = load_font(52, bold=True)
+    f_sub     = load_font(18, bold=False)
+    f_label   = load_font(20, bold=False)
+    f_value   = load_font(20, bold=True)
+    f_item    = load_font(22, bold=True)
+    f_item_sm = load_font(19, bold=False)
+    f_total_l = load_font(19, bold=False)
+    f_total_v = load_font(34, bold=True)
+    f_footer  = load_font(18, bold=False)
+
+    def tw(text, font):
+        bb = ImageDraw.Draw(Image.new("RGB", (1,1))).textbbox((0,0), text, font=font)
+        return bb[2] - bb[0]
+
+    def th(text, font):
+        bb = ImageDraw.Draw(Image.new("RGB", (1,1))).textbbox((0,0), text, font=font)
+        return bb[3] - bb[1]
+
+    # ── Hitung tinggi ──
+    HEADER_H  = 160
+    INFO_H    = 14 + (4 * 32) + (1 if nama_customer != "-" else 0)*32 + (1 if hp_customer != "-" else 0)*32 + 14
+    DIVIDER_H = 1
+    ITEMS_H   = sum([32 + 28 + 10 for _ in keranjang]) + 16
+    TOTAL_H   = 120
+    TUNAI_H   = 64 if tunai > 0 else 0
+    METODE_H  = 48
+    FOOTER_H  = 80
+    H = HEADER_H + INFO_H + DIVIDER_H + ITEMS_H + TOTAL_H + TUNAI_H + METODE_H + FOOTER_H + 20
+
+    img  = Image.new("RGB", (W, H), WHITE)
     draw = ImageDraw.Draw(img)
 
-    # Font — pakai default PIL (tidak perlu install font tambahan)
-    try:
-        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 28)
-        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 22)
-        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
-    except Exception:
-        font_lg = ImageFont.load_default()
-        font_md = ImageFont.load_default()
-        font_sm = ImageFont.load_default()
+    # ── HEADER (dark bg) ──
+    draw.rectangle([(0, 0), (W, HEADER_H)], fill=DARK)
 
-    BLACK = (0, 0, 0)
-    GRAY  = (120, 120, 120)
+    # Sub label
+    sub_text = "BARBERSHOP"
+    draw.text(((W - tw(sub_text, f_sub)) // 2, 22), sub_text, fill=(136, 136, 136), font=f_sub)
 
-    def draw_line(y, text, font=None, color=BLACK, center=False, right=False):
-        if font is None:
-            font = font_md
-        if center:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            tw = bbox[2] - bbox[0]
-            x = (W - tw) // 2
-        elif right:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            tw = bbox[2] - bbox[0]
-            x = W - PAD - tw
-        else:
-            x = PAD
-        draw.text((x, y), text, fill=color, font=font)
+    # Nama outlet besar
+    brand = outlet.upper().replace(" BARBERSHOP POS", "").replace(" POS", "").strip()
+    draw.text(((W - tw(brand, f_brand)) // 2, 44), brand, fill=WHITE, font=f_brand)
 
-    def draw_separator(y, double=False):
-        char = "=" if double else "-"
-        draw.text((PAD, y), char * 44, fill=BLACK, font=font_sm)
+    # Divider tipis di header
+    draw.line([(PAD, 118), (W - PAD, 118)], fill=(60, 60, 60), width=1)
 
-    y = PAD
+    # No nota & waktu
+    draw.text(((W - tw(no_nota, f_item_sm)) // 2, 126), no_nota, fill=(100, 100, 100), font=f_item_sm)
 
-    # ── HEADER ──
-    draw_separator(y, double=True); y += LINE_H_SM
-    draw_line(y, outlet, font=font_lg, center=True); y += LINE_H + 4
-    draw_separator(y, double=True); y += LINE_H_SM + 4
+    y = HEADER_H + 14
 
-    # ── INFO NOTA ──
-    draw_line(y, f"No   : {no_nota}", font=font_sm); y += LINE_H_SM
-    draw_line(y, f"Tgl  : {waktu}", font=font_sm); y += LINE_H_SM
-    draw_line(y, f"Kasir: {kasir}", font=font_sm); y += LINE_H_SM
-    draw_line(y, f"Cps  : {capster}", font=font_sm); y += LINE_H_SM
+    # ── INFO ──
+    def draw_row(y, label, value):
+        draw.text((PAD, y), label, fill=DGRAY, font=f_label)
+        draw.text((W - PAD - tw(value, f_value), y), value, fill=BLACK, font=f_value)
+        return y + 32
+
+    y = draw_row(y, "Kasir",    str(kasir))
+    y = draw_row(y, "Capster",  str(capster))
     if nama_customer != "-":
-        draw_line(y, f"Cust : {nama_customer}", font=font_sm); y += LINE_H_SM
+        y = draw_row(y, "Customer", str(nama_customer))
     if hp_customer != "-":
-        draw_line(y, f"HP   : {hp_customer}", font=font_sm); y += LINE_H_SM
+        y = draw_row(y, "HP",       str(hp_customer))
+    y = draw_row(y, "Waktu",    str(waktu))
 
-    draw_separator(y); y += LINE_H_SM + 4
+    # ── DIVIDER ──
+    y += 10
+    draw.line([(PAD, y), (W - PAD, y)], fill=LGRAY, width=1)
+    y += 16
 
-    # ── ITEM ──
+    # ── ITEMS ──
     for item in keranjang:
-        draw_line(y, item["nama"], font=font_md); y += LINE_H_SM
-        qty_str = f"  {item['qty']} x {fmt_rupiah(item['harga'])}"
-        sub_str = fmt_rupiah(item["subtotal"])
-        draw_line(y, qty_str, font=font_sm, color=GRAY)
-        draw_line(y, sub_str, font=font_sm, right=True)
-        y += LINE_H_SM + 4
+        draw.text((PAD, y), item["nama"], fill=BLACK, font=f_item)
+        draw.text((W - PAD - tw(fmt_rupiah(item["subtotal"]), f_item), y),
+                  fmt_rupiah(item["subtotal"]), fill=BLACK, font=f_item)
+        y += 32
+        qty_txt = f"{item['qty']} x {fmt_rupiah(item['harga'])}"
+        draw.text((PAD, y), qty_txt, fill=DGRAY, font=f_item_sm)
+        y += 28 + 10
 
-    draw_separator(y); y += LINE_H_SM + 4
+    # ── DIVIDER ──
+    draw.line([(PAD, y), (W - PAD, y)], fill=LGRAY, width=1)
+    y += 20
+
+    # ── TUNAI & KEMBALI ──
+    if tunai > 0:
+        draw.text((PAD, y), "Tunai", fill=DGRAY, font=f_total_l)
+        draw.text((W - PAD - tw(fmt_rupiah(tunai), f_total_l), y),
+                  fmt_rupiah(tunai), fill=DGRAY, font=f_total_l)
+        y += 30
+        draw.text((PAD, y), "Kembali", fill=DGRAY, font=f_total_l)
+        draw.text((W - PAD - tw(fmt_rupiah(kembalian), f_total_l), y),
+                  fmt_rupiah(kembalian), fill=DGRAY, font=f_total_l)
+        y += 34
 
     # ── TOTAL ──
-    draw_line(y, "TOTAL", font=font_lg)
-    draw_line(y, fmt_rupiah(grand_total), font=font_lg, right=True)
-    y += LINE_H + 8
+    draw.text((PAD, y + 6), "TOTAL", fill=DGRAY, font=f_total_l)
+    draw.text((W - PAD - tw(fmt_rupiah(grand_total), f_total_v), y),
+              fmt_rupiah(grand_total), fill=BLACK, font=f_total_v)
+    y += 52
 
-    if tunai > 0:
-        draw_line(y, "TUNAI", font=font_sm)
-        draw_line(y, fmt_rupiah(tunai), font=font_sm, right=True)
-        y += LINE_H_SM
-        draw_line(y, "KEMBALI", font=font_sm)
-        draw_line(y, fmt_rupiah(kembalian), font=font_sm, right=True)
-        y += LINE_H_SM
-
-    draw_line(y, f"METODE : {metode}", font=font_sm, color=GRAY); y += LINE_H_SM + 4
-    draw_separator(y, double=True); y += LINE_H_SM
+    # ── METODE ──
+    draw.line([(PAD, y), (W - PAD, y)], fill=LGRAY, width=1)
+    y += 12
+    draw.text((PAD, y), "Metode bayar", fill=DGRAY, font=f_label)
+    pill_text = metode
+    pill_w = tw(pill_text, f_label) + 24
+    pill_x = W - PAD - pill_w
+    draw.rounded_rectangle([(pill_x, y - 2), (W - PAD, y + 26)], radius=12, fill=LLGRAY)
+    draw.text((pill_x + 12, y), pill_text, fill=BLACK, font=f_label)
+    y += 44
 
     # ── FOOTER ──
-    draw_line(y, "Terima kasih!", font=font_md, center=True); y += LINE_H
-    draw_line(y, "kasbot.id", font=font_sm, center=True, color=GRAY)
-
-    # Crop ke tinggi aktual
-    img = img.crop((0, 0, W, y + PAD * 2))
+    draw.line([(PAD, y), (W - PAD, y)], fill=LGRAY, width=1)
+    y += 16
+    thanks = "Terima kasih!"
+    draw.text(((W - tw(thanks, f_item_sm)) // 2, y), thanks, fill=BLACK, font=f_item_sm)
+    y += 28
+    kasbot = "kasbot.id"
+    draw.text(((W - tw(kasbot, f_footer)) // 2, y), kasbot, fill=DGRAY, font=f_footer)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", dpi=(203, 203))
