@@ -68,44 +68,66 @@ def get_gspread_client():
     return gspread.authorize(get_credentials())
 
 # ─────────────────────────────────────────
-# ImgBB Upload
+# Cloudinary Upload
 # ─────────────────────────────────────────
 
 def upload_foto_to_drive(image_bytes, filename):
-    """Upload foto ke ImgBB, return link. Return '' jika gagal."""
+    """Upload foto ke Cloudinary, return link. Return '' jika gagal."""
     try:
-        api_key = os.environ.get("IMGBB_API_KEY", "").strip()
-        if not api_key:
-            logger.error("[IMGBB] IMGBB_API_KEY kosong!")
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
+        api_key    = os.environ.get("CLOUDINARY_API_KEY", "").strip()
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET", "").strip()
+
+        if not all([cloud_name, api_key, api_secret]):
+            logger.error("[CLOUDINARY] Credentials kosong!")
             return ""
 
-        logger.info(f"[IMGBB] Mulai upload: {filename}")
+        logger.info(f"[CLOUDINARY] Mulai upload: {filename}")
 
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        data = urllib.parse.urlencode({
-            "key": api_key,
-            "image": b64,
-            "name": filename,
-        }).encode("utf-8")
+        # Cloudinary pakai signed upload via REST API
+        import hashlib, time
+        timestamp = str(int(time.time()))
+        public_id = filename.replace(".jpg", "")
 
+        # Buat signature
+        sign_str = f"public_id={public_id}&timestamp={timestamp}{api_secret}"
+        signature = hashlib.sha1(sign_str.encode("utf-8")).hexdigest()
+
+        # Multipart form upload
+        boundary = "----CloudinaryBoundary"
+        body = b""
+        fields = {
+            "api_key": api_key,
+            "timestamp": timestamp,
+            "public_id": public_id,
+            "signature": signature,
+        }
+        for key, val in fields.items():
+            body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n".encode()
+        body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: image/jpeg\r\n\r\n".encode()
+        body += image_bytes
+        body += f"\r\n--{boundary}--\r\n".encode()
+
+        url = f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload"
         req = urllib.request.Request(
-            "https://api.imgbb.com/1/upload",
-            data=data,
-            method="POST"
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
-        if result.get("success"):
-            link = result["data"]["url"]  # direct image link
-            logger.info(f"[IMGBB] Upload berhasil: {link}")
+        link = result.get("secure_url", "")
+        if link:
+            logger.info(f"[CLOUDINARY] Upload berhasil: {link}")
             return link
         else:
-            logger.error(f"[IMGBB] Upload gagal: {result}")
+            logger.error(f"[CLOUDINARY] Upload gagal: {result}")
             return ""
 
     except Exception as e:
-        logger.error(f"[IMGBB] Upload error - {type(e).__name__}: {e}", exc_info=True)
+        logger.error(f"[CLOUDINARY] Upload error - {type(e).__name__}: {e}", exc_info=True)
         return ""
 
 # ─────────────────────────────────────────
