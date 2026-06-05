@@ -1773,6 +1773,159 @@ def generate_struk_image(outlet, no_nota, waktu, kasir, capster, nama_customer,
     return buf
 
 
+def generate_struk_pdf(outlet, no_nota, waktu, kasir, capster, nama_customer,
+                       hp_customer, keranjang, grand_total, tunai, kembalian, metode):
+    """Generate struk sebagai PDF siap print, return BytesIO."""
+    try:
+        from fpdf import FPDF
+
+        # Ukuran 80mm thermal printer = 80mm wide
+        # 1 mm = 2.8346 pt, tapi fpdf pakai mm
+        W = 80  # mm
+
+        pdf = FPDF(orientation='P', unit='mm', format=(W, 200))
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=3)
+        pdf.set_margins(4, 3, 4)
+
+        # ── HEADER ──
+        pdf.set_fill_color(26, 26, 26)
+        pdf.rect(0, 0, W, 28, 'F')
+
+        pdf.set_text_color(136, 136, 136)
+        pdf.set_font('Helvetica', '', 7)
+        pdf.set_xy(0, 4)
+        pdf.cell(W, 4, 'BARBERSHOP', align='C')
+
+        brand = outlet.upper().replace(' BARBERSHOP POS', '').replace(' POS', '').strip()
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font('Helvetica', 'B', 16)
+        pdf.set_xy(0, 9)
+        pdf.cell(W, 7, brand, align='C')
+
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_font('Helvetica', '', 6)
+        pdf.set_xy(0, 19)
+        pdf.cell(W, 4, no_nota, align='C')
+        pdf.set_xy(0, 23)
+        pdf.cell(W, 4, waktu, align='C')
+
+        pdf.set_text_color(0, 0, 0)
+        y = 32
+
+        # ── INFO ──
+        pdf.set_font('Helvetica', '', 7.5)
+        def row(label, value, yy):
+            pdf.set_xy(4, yy)
+            pdf.set_text_color(100, 100, 100)
+            pdf.cell(20, 5, label)
+            pdf.set_text_color(26, 26, 26)
+            pdf.set_font('Helvetica', 'B', 7.5)
+            pdf.set_xy(24, yy)
+            pdf.cell(W - 28, 5, str(value), align='R')
+            pdf.set_font('Helvetica', '', 7.5)
+            return yy + 5
+
+        y = row('Kasir', kasir, y)
+        y = row('Capster', capster, y)
+        if nama_customer and nama_customer != '-':
+            y = row('Customer', nama_customer, y)
+        if hp_customer and hp_customer != '-':
+            y = row('HP', hp_customer, y)
+        y = row('Waktu', waktu, y)
+
+        # Garis
+        y += 1
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(4, y, W - 4, y)
+        y += 3
+
+        # ── ITEMS ──
+        for item in keranjang:
+            pdf.set_xy(4, y)
+            pdf.set_text_color(26, 26, 26)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.cell(W - 8, 5, item['nama'])
+            y += 5
+            pdf.set_xy(4, y)
+            pdf.set_font('Helvetica', '', 7)
+            pdf.set_text_color(100, 100, 100)
+            pdf.cell(30, 4, f"{item['qty']} x {fmt_rupiah(item['harga'])}")
+            pdf.set_xy(4, y)
+            pdf.set_text_color(26, 26, 26)
+            pdf.set_font('Helvetica', '', 7)
+            pdf.cell(W - 8, 4, fmt_rupiah(item['subtotal']), align='R')
+            y += 5
+
+        # Garis
+        y += 1
+        pdf.line(4, y, W - 4, y)
+        y += 3
+
+        # ── TUNAI & KEMBALI ──
+        if tunai > 0:
+            pdf.set_font('Helvetica', '', 7.5)
+            pdf.set_text_color(100, 100, 100)
+            pdf.set_xy(4, y)
+            pdf.cell(30, 5, 'Tunai')
+            pdf.set_xy(4, y)
+            pdf.cell(W - 8, 5, fmt_rupiah(tunai), align='R')
+            y += 5
+            pdf.set_xy(4, y)
+            pdf.cell(30, 5, 'Kembali')
+            pdf.set_xy(4, y)
+            pdf.cell(W - 8, 5, fmt_rupiah(kembalian), align='R')
+            y += 5
+
+        # ── TOTAL ──
+        pdf.set_font('Helvetica', '', 7.5)
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_xy(4, y)
+        pdf.cell(20, 7, 'TOTAL')
+        pdf.set_font('Helvetica', 'B', 12)
+        pdf.set_text_color(26, 26, 26)
+        pdf.set_xy(4, y)
+        pdf.cell(W - 8, 7, fmt_rupiah(grand_total), align='R')
+        y += 9
+
+        # ── METODE ──
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(4, y, W - 4, y)
+        y += 3
+        pdf.set_font('Helvetica', '', 7)
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_xy(4, y)
+        pdf.cell(25, 5, 'Metode bayar')
+        pdf.set_xy(4, y)
+        pdf.set_text_color(26, 26, 26)
+        pdf.cell(W - 8, 5, metode, align='R')
+        y += 7
+
+        # ── FOOTER ──
+        pdf.line(4, y, W - 4, y)
+        y += 3
+        pdf.set_font('Helvetica', 'B', 8)
+        pdf.set_text_color(26, 26, 26)
+        pdf.set_xy(0, y)
+        pdf.cell(W, 5, 'Terima kasih!', align='C')
+        y += 5
+        pdf.set_font('Helvetica', '', 6.5)
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_xy(0, y)
+        pdf.cell(W, 4, 'kasbot.id', align='C')
+
+        # Trim halaman ke konten
+        pdf.page_break_trigger = y + 10
+
+        buf = io.BytesIO(pdf.output())
+        buf.seek(0)
+        return buf
+
+    except Exception as e:
+        logger.error(f"[PDF] Gagal generate: {e}", exc_info=True)
+        return None
+
+
 async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembalian):
     if user_id not in user_data_temp:
         return ConversationHandler.END
@@ -1834,8 +1987,23 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
         await bot.send_photo(
             chat_id=chat_id,
             photo=struk_img,
-            caption=f"🧾 Struk {no_nota}\n💰 {fmt_rupiah(grand_total)} — {metode}"
+            caption=f"🧾 {no_nota}\n💰 {fmt_rupiah(grand_total)} — {metode}"
         )
+
+        # Generate & kirim struk PDF untuk print
+        struk_pdf = generate_struk_pdf(
+            outlet, no_nota, waktu, kasir, capster,
+            nama_customer, hp_customer, keranjang,
+            grand_total, tunai, kembalian, metode
+        )
+        if struk_pdf:
+            pdf_filename = f"struk_{no_nota.replace('/', '_')}.pdf"
+            await bot.send_document(
+                chat_id=chat_id,
+                document=struk_pdf,
+                filename=pdf_filename,
+                caption="🖨️ Tap untuk print"
+            )
 
     except Exception as e:
         logger.error(f"[POS] Gagal simpan: {e}", exc_info=True)
