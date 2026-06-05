@@ -1152,12 +1152,31 @@ def get_sheet_name_pos(dt=None):
     d = dt or datetime.now()
     return f"Penjualan {BULAN[d.month-1]} {d.year}"
 
-def get_pos_spreadsheet_id():
+def get_pos_spreadsheet_id(chat_title=None):
+    """Ambil Spreadsheet ID berdasar nama group Telegram (multi-outlet)"""
+    if chat_title:
+        # Normalisasi nama group: uppercase, spasi -> underscore, hapus karakter non-alphanumeric
+        import re
+        key = re.sub(r'[^A-Z0-9]', '_', chat_title.upper().strip())
+        key = re.sub(r'_+', '_', key).strip('_')
+        env_key = f"OUTLET_{key}"
+        sid = os.environ.get(env_key)
+        if sid:
+            logger.info(f"[OUTLET] {chat_title} -> {env_key} -> {sid[:10]}...")
+            return sid
+        # Coba partial match
+        for k, v in os.environ.items():
+            if k.startswith("OUTLET_") and any(
+                word in k for word in key.split("_") if len(word) > 2
+            ):
+                logger.info(f"[OUTLET] Partial match: {chat_title} -> {k}")
+                return v
+        logger.warning(f"[OUTLET] Tidak ada match untuk '{chat_title}' (key: {env_key}), pakai default")
     return os.environ.get("SPREADSHEET_ID_POS", os.environ.get("SPREADSHEET_ID_KAS_BESAR"))
 
-def get_pos_sheet(dt=None):
+def get_pos_sheet(dt=None, chat_title=None):
     gc = get_gspread_client()
-    sid = get_pos_spreadsheet_id()
+    sid = get_pos_spreadsheet_id(chat_title)
     sh = gc.open_by_key(sid)
     sname = get_sheet_name_pos(dt)
     try:
@@ -1175,9 +1194,9 @@ def get_pos_sheet(dt=None):
         })
     return ws
 
-def get_produk_sheet():
+def get_produk_sheet(chat_title=None):
     gc = get_gspread_client()
-    sid = get_pos_spreadsheet_id()
+    sid = get_pos_spreadsheet_id(chat_title)
     sh = gc.open_by_key(sid)
     try:
         ws = sh.worksheet("Master Produk")
@@ -1190,9 +1209,9 @@ def get_produk_sheet():
         })
     return ws
 
-def get_all_produk():
+def get_all_produk(chat_title=None):
     try:
-        ws = get_produk_sheet()
+        ws = get_produk_sheet(chat_title)
         rows = ws.get_all_values()
         produk = []
         for i, row in enumerate(rows[1:], start=2):
@@ -1216,9 +1235,9 @@ def generate_no_nota(outlet):
     outlet_code = "".join([c for c in (outlet or "OUT").upper() if c.isalpha()])[:3]
     return f"{outlet_code}/{now.strftime('%y%m%d')}/{now.strftime('%H%M%S')}"
 
-def get_omzet_hari_ini(outlet=None):
+def get_omzet_hari_ini(outlet=None, chat_title=None):
     try:
-        ws = get_pos_sheet()
+        ws = get_pos_sheet(chat_title=chat_title)
         rows = ws.get_all_values()
         today = datetime.now().strftime("%d/%m/%Y")
         total = 0
@@ -1238,11 +1257,11 @@ def get_omzet_hari_ini(outlet=None):
         logger.error(f"[POS] omzet error: {e}")
         return 0, 0
 
-def get_all_capster():
+def get_all_capster(chat_title=None):
     """Ambil semua capster aktif dari sheet Master Capster"""
     try:
         gc = get_gspread_client()
-        sid = get_pos_spreadsheet_id()
+        sid = get_pos_spreadsheet_id(chat_title)
         sh = gc.open_by_key(sid)
 
         # Coba semua kemungkinan nama sheet
@@ -1320,7 +1339,8 @@ async def cmd_pos_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    produk = get_all_produk()
+    chat_title = update.effective_chat.title or ""
+    produk = get_all_produk(chat_title)
     if not produk:
         await update.message.reply_text("Belum ada produk.\nTambah dengan /tambah_produk")
         return
@@ -1398,12 +1418,13 @@ async def handle_pos_setup_konfirmasi(update: Update, context: ContextTypes.DEFA
 async def cmd_jual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat = update.effective_chat
-    produk = get_all_produk()
+    chat_title = update.effective_chat.title or ""
+    produk = get_all_produk(chat_title)
     if not produk:
         await update.message.reply_text("⚠️ Belum ada produk! Minta admin tambah dulu.")
         return ConversationHandler.END
     user_data_temp[user_id] = {
-        "pos_mode": True, "outlet": chat.title or "Outlet",
+        "pos_mode": True, "outlet": chat.title or "Outlet", "chat_title": chat.title or "",
         "kasir": update.effective_user.first_name or "Kasir",
         "produk_list": produk, "keranjang": [],
     }
@@ -1480,7 +1501,8 @@ async def handle_pos_keranjang_action(update: Update, context: ContextTypes.DEFA
         keranjang = user_data_temp[user_id]["keranjang"]
         grand_total = sum(i["subtotal"] for i in keranjang)
         user_data_temp[user_id]["grand_total"] = grand_total
-        capster_list = get_all_capster()
+        ct = user_data_temp[user_id].get("chat_title", "")
+        capster_list = get_all_capster(ct)
         if not capster_list:
             await query.edit_message_text(f"💰 Total: {fmt_rupiah(grand_total)}\n\n✂️ Ketik nama capster:")
             return POS_INPUT_CAPSTER
@@ -1774,7 +1796,7 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
         bot = reply_target.get_bot()
 
     try:
-        ws = get_pos_sheet()
+        ws = get_pos_sheet(chat_title=outlet)
         for item in keranjang:
             ws.append_row([
                 no_nota, waktu, outlet, kasir, capster, nama_customer, hp_customer,
@@ -1913,7 +1935,7 @@ async def cmd_cari_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_omzet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    total, count = get_omzet_hari_ini(chat.title)
+    total, count = get_omzet_hari_ini(chat.title, chat_title=chat.title)
     today = datetime.now().strftime("%d/%m/%Y")
     await update.message.reply_text(
         f"📊 Omzet Hari Ini — {today}\n🏪 {chat.title}\n\n💰 {fmt_rupiah(total)}\n🧾 {count} transaksi"
@@ -1922,7 +1944,7 @@ async def cmd_omzet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     try:
-        ws = get_pos_sheet()
+        ws = get_pos_sheet(chat_title=chat.title)
         rows = ws.get_all_values()
         data = [r for r in rows[1:] if r and r[0]]
         total_bulan = 0
@@ -1970,7 +1992,8 @@ async def cmd_edit_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Hanya admin.")
         return ConversationHandler.END
-    produk = get_all_produk()
+    ct = update.effective_chat.title or ""
+    produk = get_all_produk(ct)
     if not produk:
         await update.message.reply_text("Belum ada produk.")
         return ConversationHandler.END
@@ -2040,7 +2063,7 @@ async def handle_edit_produk_nilai(update: Update, context: ContextTypes.DEFAULT
         nilai = fmt_rupiah(int(nilai_clean))
     try:
         ws = get_produk_sheet()
-        ws.update_cell(produk["row_idx"], col, nilai)
+        ws.update_cell(produk["row_idx"], col, nilai)  # produk sudah di-cache, sheet sama
         user_data_temp.pop(user_id, None)
         nama_p = produk["nama"]
         await update.message.reply_text(f"✅ Produk {nama_p} berhasil diupdate!\n{field.capitalize()}: {nilai}")
@@ -2057,7 +2080,8 @@ async def cmd_hapus_produk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Hanya admin.")
         return ConversationHandler.END
-    produk = get_all_produk()
+    ct = update.effective_chat.title or ""
+    produk = get_all_produk(ct)
     if not produk:
         await update.message.reply_text("Belum ada produk.")
         return ConversationHandler.END
@@ -2113,9 +2137,9 @@ async def handle_hapus_produk_konfirmasi(update: Update, context: ContextTypes.D
 # Tambah & Hapus Capster
 # ─────────────────────────────────────────
 
-def get_capster_sheet():
+def get_capster_sheet(chat_title=None):
     gc = get_gspread_client()
-    sid = get_pos_spreadsheet_id()
+    sid = get_pos_spreadsheet_id(chat_title)
     sh = gc.open_by_key(sid)
     sheet_names = [s.title for s in sh.worksheets()]
     for name in sheet_names:
@@ -2130,7 +2154,7 @@ async def cmd_tambah_capster(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Hanya admin.")
         return ConversationHandler.END
-    user_data_temp[user_id] = {"action": "tambah_capster"}
+    user_data_temp[user_id] = {"action": "tambah_capster", "chat_title": update.effective_chat.title or ""}
     await update.message.reply_text("➕ Nama capster baru:")
     return POS_TAMBAH_CAPSTER_NAMA
 
@@ -2196,7 +2220,7 @@ async def handle_tambah_capster_konfirmasi(update: Update, context: ContextTypes
         return ConversationHandler.END
     temp = user_data_temp[user_id]
     try:
-        ws = get_capster_sheet()
+        ws = get_capster_sheet(temp.get("chat_title", ""))
         ws.append_row([temp["capster_nama"], "YA", temp["komisi_l"], temp["komisi_p"], temp["komisi_pkt"]])
         user_data_temp.pop(user_id, None)
         await query.edit_message_text(f"✅ Capster {temp['capster_nama']} berhasil ditambahkan!")
@@ -2209,13 +2233,14 @@ async def cmd_hapus_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Hanya admin.")
         return ConversationHandler.END
-    capster = get_all_capster()
+    ct = update.effective_chat.title or ""
+    capster = get_all_capster(ct)
     if not capster:
         await update.message.reply_text("Belum ada capster.")
         return ConversationHandler.END
     keyboard = [[InlineKeyboardButton(f"🗑 {c}", callback_data=f"hapuscap_{c}")] for c in capster]
     keyboard.append([InlineKeyboardButton("❌ Batalkan", callback_data="hapuscap_batal")])
-    user_data_temp[user_id] = {"capster_list": capster}
+    user_data_temp[user_id] = {"capster_list": capster, "chat_title": update.effective_chat.title or ""}
     await update.message.reply_text("🗑️ Pilih capster yang ingin dihapus:", reply_markup=InlineKeyboardMarkup(keyboard))
     return POS_HAPUS_CAPSTER_PILIH
 
@@ -2246,7 +2271,8 @@ async def handle_hapus_capster_konfirmasi(update: Update, context: ContextTypes.
         return ConversationHandler.END
     nama = user_data_temp[user_id]["hapus_capster"]
     try:
-        ws = get_capster_sheet()
+        ct = user_data_temp[user_id].get("chat_title", "")
+        ws = get_capster_sheet(ct)
         rows = ws.get_all_values()
         for i, row in enumerate(rows[1:], start=2):
             if row and row[0].strip().lower() == nama.lower():
@@ -2267,8 +2293,9 @@ async def cmd_void(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Hanya admin.")
         return ConversationHandler.END
+    chat_title = update.effective_chat.title or ""
     try:
-        ws = get_pos_sheet()
+        ws = get_pos_sheet(chat_title=chat_title)
         rows = ws.get_all_values()
         # Ambil 10 transaksi terbaru (unique no_nota)
         seen = set()
