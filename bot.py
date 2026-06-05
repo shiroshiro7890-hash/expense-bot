@@ -1499,6 +1499,119 @@ async def handle_pos_input_tunai(update: Update, context: ContextTypes.DEFAULT_T
         return POS_INPUT_TUNAI
     return await simpan_transaksi_pos(update.message, user_id, grand_total, tunai, tunai - grand_total)
 
+def generate_struk_image(outlet, no_nota, waktu, kasir, capster, nama_customer,
+                         hp_customer, keranjang, grand_total, tunai, kembalian, metode):
+    """Generate struk sebagai PNG, return bytes."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    # Ukuran 80mm thermal printer @ 203dpi = 640px wide
+    W = 640
+    PAD = 24
+    LINE_H = 36
+    LINE_H_SM = 28
+
+    # Hitung tinggi dulu
+    n_lines = 10  # header + footer tetap
+    n_lines += len(keranjang) * 3
+    if nama_customer != "-": n_lines += 1
+    if hp_customer != "-": n_lines += 1
+    if tunai > 0: n_lines += 2
+    H = PAD * 4 + n_lines * LINE_H + 120
+
+    img = Image.new("RGB", (W, H), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Font — pakai default PIL (tidak perlu install font tambahan)
+    try:
+        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 28)
+        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 22)
+        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
+    except Exception:
+        font_lg = ImageFont.load_default()
+        font_md = ImageFont.load_default()
+        font_sm = ImageFont.load_default()
+
+    BLACK = (0, 0, 0)
+    GRAY  = (120, 120, 120)
+
+    def draw_line(y, text, font=None, color=BLACK, center=False, right=False):
+        if font is None:
+            font = font_md
+        if center:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            x = (W - tw) // 2
+        elif right:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            x = W - PAD - tw
+        else:
+            x = PAD
+        draw.text((x, y), text, fill=color, font=font)
+
+    def draw_separator(y, double=False):
+        char = "=" if double else "-"
+        draw.text((PAD, y), char * 44, fill=BLACK, font=font_sm)
+
+    y = PAD
+
+    # ── HEADER ──
+    draw_separator(y, double=True); y += LINE_H_SM
+    draw_line(y, outlet, font=font_lg, center=True); y += LINE_H + 4
+    draw_separator(y, double=True); y += LINE_H_SM + 4
+
+    # ── INFO NOTA ──
+    draw_line(y, f"No   : {no_nota}", font=font_sm); y += LINE_H_SM
+    draw_line(y, f"Tgl  : {waktu}", font=font_sm); y += LINE_H_SM
+    draw_line(y, f"Kasir: {kasir}", font=font_sm); y += LINE_H_SM
+    draw_line(y, f"Cps  : {capster}", font=font_sm); y += LINE_H_SM
+    if nama_customer != "-":
+        draw_line(y, f"Cust : {nama_customer}", font=font_sm); y += LINE_H_SM
+    if hp_customer != "-":
+        draw_line(y, f"HP   : {hp_customer}", font=font_sm); y += LINE_H_SM
+
+    draw_separator(y); y += LINE_H_SM + 4
+
+    # ── ITEM ──
+    for item in keranjang:
+        draw_line(y, item["nama"], font=font_md); y += LINE_H_SM
+        qty_str = f"  {item['qty']} x {fmt_rupiah(item['harga'])}"
+        sub_str = fmt_rupiah(item["subtotal"])
+        draw_line(y, qty_str, font=font_sm, color=GRAY)
+        draw_line(y, sub_str, font=font_sm, right=True)
+        y += LINE_H_SM + 4
+
+    draw_separator(y); y += LINE_H_SM + 4
+
+    # ── TOTAL ──
+    draw_line(y, "TOTAL", font=font_lg)
+    draw_line(y, fmt_rupiah(grand_total), font=font_lg, right=True)
+    y += LINE_H + 8
+
+    if tunai > 0:
+        draw_line(y, "TUNAI", font=font_sm)
+        draw_line(y, fmt_rupiah(tunai), font=font_sm, right=True)
+        y += LINE_H_SM
+        draw_line(y, "KEMBALI", font=font_sm)
+        draw_line(y, fmt_rupiah(kembalian), font=font_sm, right=True)
+        y += LINE_H_SM
+
+    draw_line(y, f"METODE : {metode}", font=font_sm, color=GRAY); y += LINE_H_SM + 4
+    draw_separator(y, double=True); y += LINE_H_SM
+
+    # ── FOOTER ──
+    draw_line(y, "Terima kasih!", font=font_md, center=True); y += LINE_H
+    draw_line(y, "kasbot.id", font=font_sm, center=True, color=GRAY)
+
+    # Crop ke tinggi aktual
+    img = img.crop((0, 0, W, y + PAD * 2))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", dpi=(203, 203))
+    buf.seek(0)
+    return buf
+
+
 async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembalian):
     if user_id not in user_data_temp:
         return ConversationHandler.END
@@ -1512,6 +1625,15 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
     hp_customer = temp.get("hp_customer", "-")
     no_nota = generate_no_nota(outlet)
     waktu = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    # Tentukan chat_id untuk kirim gambar
+    if hasattr(reply_target, "message"):
+        chat_id = reply_target.message.chat_id
+        bot = reply_target.get_bot()
+    else:
+        chat_id = reply_target.chat_id
+        bot = reply_target.get_bot()
+
     try:
         ws = get_pos_sheet()
         for item in keranjang:
@@ -1524,23 +1646,25 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
                 "Lunas"
             ])
         user_data_temp.pop(user_id, None)
-        struk = f"{'='*28}\n  {outlet}\n{'='*28}\n"
-        struk += f"No  : {no_nota}\nTgl : {waktu}\nKasir: {kasir}\nCapster: {capster}\n"
-        if nama_customer != "-":
-            struk += f"Customer: {nama_customer}\n"
-        if hp_customer != "-":
-            struk += f"HP: {hp_customer}\n"
-        struk += f"{'-'*28}\n"
-        for item in keranjang:
-            struk += f"{item['nama']}\n  {item['qty']} x {fmt_rupiah(item['harga'])} = {fmt_rupiah(item['subtotal'])}\n"
-        struk += f"{'-'*28}\nTOTAL  : {fmt_rupiah(grand_total)}\n"
-        if tunai > 0:
-            struk += f"TUNAI  : {fmt_rupiah(tunai)}\nKEMBALI: {fmt_rupiah(kembalian)}\n"
-        struk += f"METODE : {metode}\n{'='*28}\n  Terima kasih!\n{'='*28}"
+
+        # Konfirmasi singkat dulu
         if hasattr(reply_target, "edit_message_text"):
-            await reply_target.edit_message_text(f"✅ Transaksi berhasil!\n\n{struk}")
+            await reply_target.edit_message_text("✅ Transaksi berhasil! Membuat struk...")
         else:
-            await reply_target.reply_text(f"✅ Transaksi berhasil!\n\n{struk}")
+            await reply_target.reply_text("✅ Transaksi berhasil! Membuat struk...")
+
+        # Generate & kirim struk PNG
+        struk_img = generate_struk_image(
+            outlet, no_nota, waktu, kasir, capster,
+            nama_customer, hp_customer, keranjang,
+            grand_total, tunai, kembalian, metode
+        )
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=struk_img,
+            caption=f"🧾 Struk {no_nota}\n💰 {fmt_rupiah(grand_total)} — {metode}"
+        )
+
     except Exception as e:
         logger.error(f"[POS] Gagal simpan: {e}", exc_info=True)
         if hasattr(reply_target, "edit_message_text"):
