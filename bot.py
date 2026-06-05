@@ -35,7 +35,7 @@ DELETE_PILIH_TRANSAKSI, DELETE_KONFIRMASI = range(11, 13)
 RESET_KONFIRMASI = 13
 
 # POS States
-POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI = range(14, 18)
+POS_PILIH_PRODUK, POS_INPUT_QTY, POS_PILIH_BAYAR, POS_INPUT_TUNAI, POS_INPUT_CAPSTER = range(14, 19)
 POS_SETUP_NAMA, POS_SETUP_HARGA, POS_SETUP_KONFIRMASI = range(18, 21)
 POS_EDIT_PILIH, POS_EDIT_FIELD, POS_EDIT_NILAI = range(21, 24)
 POS_HAPUS_PILIH, POS_HAPUS_KONFIRMASI = range(24, 26)
@@ -1450,10 +1450,10 @@ def get_pos_sheet(dt=None):
         ws = sh.add_worksheet(title=sname, rows=2000, cols=12)
         ws.append_row([
             "No Nota", "Waktu", "Outlet", "Kasir",
-            "Produk", "Qty", "Harga Satuan", "Total",
+            "Capster", "Produk", "Qty", "Harga Satuan", "Total",
             "Metode Bayar", "Tunai", "Kembalian", "Status"
         ])
-        ws.format("A1:L1", {
+        ws.format("A1:M1", {
             "backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
         })
@@ -1521,7 +1521,7 @@ def get_omzet_hari_ini(outlet=None):
             if outlet and len(row) > 2 and outlet.lower() not in row[2].lower():
                 continue
             try:
-                total += int(re.sub(r"[^0-9]", "", str(row[7]))) if len(row) > 7 and row[7] else 0
+                total += int(re.sub(r"[^0-9]", "", str(row[8]))) if len(row) > 8 and row[8] else 0
                 count += 1
             except Exception:
                 continue
@@ -1837,10 +1837,34 @@ async def handle_pos_keranjang_action(update: Update, context: ContextTypes.DEFA
         user_data_temp[user_id]["grand_total"] = grand_total
         await query.edit_message_text(
             f"💰 Total: {fmt_rupiah(grand_total)}\n\n"
-            f"Pilih metode pembayaran:",
-            reply_markup=build_bayar_keyboard()
+            f"✂️ Ketik nama capster yang melayani:\n"
+            f"Contoh: Budi"
         )
-        return POS_PILIH_BAYAR
+        return POS_INPUT_CAPSTER
+
+
+async def handle_pos_input_capster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    capster = update.message.text.strip()
+
+    if user_id not in user_data_temp:
+        await update.message.reply_text("⚠️ Session expired.")
+        return ConversationHandler.END
+
+    if not capster:
+        await update.message.reply_text("❌ Nama capster tidak boleh kosong. Coba lagi:")
+        return POS_INPUT_CAPSTER
+
+    user_data_temp[user_id]["capster"] = capster
+    grand_total = user_data_temp[user_id]["grand_total"]
+
+    await update.message.reply_text(
+        f"✂️ Capster: {capster}\n"
+        f"💰 Total: {fmt_rupiah(grand_total)}\n\n"
+        f"Pilih metode pembayaran:",
+        reply_markup=build_bayar_keyboard()
+    )
+    return POS_PILIH_BAYAR
 
 async def handle_pos_pilih_bayar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1923,12 +1947,14 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
 
     try:
         ws = get_pos_sheet()
+        capster = temp.get("capster", "-")
         for item in keranjang:
             ws.append_row([
                 no_nota,
                 waktu,
                 outlet,
                 kasir,
+                capster,
                 item["nama"],
                 item["qty"],
                 fmt_rupiah(item["harga"]),
@@ -1948,6 +1974,7 @@ async def simpan_transaksi_pos(reply_target, user_id, grand_total, tunai, kembal
         struk += f"No  : {no_nota}\n"
         struk += f"Tgl : {waktu}\n"
         struk += f"Kasir: {kasir}\n"
+        struk += f"Capster: {capster}\n"
         struk += f"{'-'*28}\n"
         for item in keranjang:
             struk += f"{item['nama']}\n"
@@ -2015,15 +2042,17 @@ async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(row) < 8:
                 continue
             try:
-                nominal = int(re.sub(r"[^0-9]", "", str(row[7]))) if row[7] else 0
+                nominal = int(re.sub(r"[^0-9]", "", str(row[8]))) if len(row) > 8 and row[8] else 0
                 total_bulan += nominal
                 count_bulan += 1
 
-                metode = row[8] if len(row) > 8 else "Lainnya"
+                metode = row[9] if len(row) > 9 else "Lainnya"
                 by_metode[metode] = by_metode.get(metode, 0) + nominal
 
-                produk = row[4] if len(row) > 4 else "Lainnya"
+                produk = row[5] if len(row) > 5 else "Lainnya"
                 by_produk[produk] = by_produk.get(produk, 0) + nominal
+
+                capster_name = row[4] if len(row) > 4 else "-"
             except Exception:
                 continue
 
@@ -2120,6 +2149,7 @@ def main():
                 CallbackQueryHandler(handle_pos_pilih_produk, pattern="^pos_produk_"),
             ],
             POS_INPUT_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_qty)],
+            POS_INPUT_CAPSTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_capster)],
             POS_PILIH_BAYAR: [CallbackQueryHandler(handle_pos_pilih_bayar, pattern="^pos_bayar_|^pos_batal$")],
             POS_INPUT_TUNAI: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pos_input_tunai)],
         },
